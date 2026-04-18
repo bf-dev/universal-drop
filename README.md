@@ -28,7 +28,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 ```bash
 mkdir -p input results archive models/whisper
 
-docker compose up --build -d
+APP_PORT=9360 docker compose up --build -d
 
 docker compose exec ollama ollama pull glm-ocr
 ```
@@ -46,13 +46,13 @@ Then drop files into `./input` or upload through the API. Successful Markdown ou
 ### Health
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:9360/health
 ```
 
 ### Upload a file
 
 ```bash
-curl -F "file=@./example.pdf" http://localhost:8080/files
+curl -F "file=@./example.pdf" http://localhost:9360/files
 ```
 
 The response includes the queued job ID.
@@ -60,19 +60,19 @@ The response includes the queued job ID.
 ### List jobs
 
 ```bash
-curl http://localhost:8080/jobs
+curl http://localhost:9360/jobs
 ```
 
 ### Inspect one job
 
 ```bash
-curl http://localhost:8080/jobs/<job-id>
+curl http://localhost:9360/jobs/<job-id>
 ```
 
 ### Fetch a finished Markdown result
 
 ```bash
-curl http://localhost:8080/jobs/<job-id>/result
+curl http://localhost:9360/jobs/<job-id>/result
 ```
 
 If the job is not complete, the endpoint returns `409 Conflict`.
@@ -81,7 +81,7 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `BIND_ADDR` | `0.0.0.0:8080` | HTTP listen address. |
+| `BIND_ADDR` | `0.0.0.0:8080` | Container HTTP listen address. Compose publishes it to host port `APP_PORT`, default `9360`. |
 | `INPUT_DIR` | `/data/input` | Watched/drop folder. |
 | `RESULTS_DIR` | `/data/results` | Markdown output folder. |
 | `ARCHIVE_DIR` | `/data/archive` | Successful-original archive. |

@@ -13,6 +13,7 @@ WORKDIR /whisper.cpp
 RUN cmake -B build \
       -DWHISPER_BUILD_TESTS=OFF \
       -DWHISPER_BUILD_EXAMPLES=ON \
+      -DBUILD_SHARED_LIBS=OFF \
       -DGGML_NATIVE=OFF \
     && cmake --build build --config Release -j"$(nproc)" \
     && mkdir -p /out \
