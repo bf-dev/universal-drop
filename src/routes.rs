@@ -4,12 +4,15 @@ use crate::{
 };
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Multipart, Path, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Serialize;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::path::Path as StdPath;
 use tokio::{fs, fs::File, io::AsyncWriteExt};
 use uuid::Uuid;
 
@@ -17,6 +20,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/files", post(upload_files))
+        .route("/text", post(upload_text))
         .route("/jobs", get(list_jobs))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/result", get(get_job_result))
@@ -40,6 +44,12 @@ struct JobsResponse {
 #[derive(Debug, Serialize)]
 struct UploadResponse {
     jobs: Vec<Job>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TextUploadRequest {
+    text: String,
+    filename: Option<String>,
 }
 
 async fn upload_files(
@@ -76,6 +86,71 @@ async fn upload_files(
     }
 
     Ok((StatusCode::CREATED, Json(UploadResponse { jobs })))
+}
+
+async fn upload_text(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
+    let (text, filename) = parse_text_upload(&headers, &body)?;
+    if text.trim().is_empty() {
+        return Err(ApiError::bad_request("text upload body is empty"));
+    }
+
+    let safe_name = text_upload_filename(filename.as_deref());
+    let final_path = unique_path_for_filename(&state.config.input_dir, &safe_name).await?;
+    let temp_name = format!(".{}.{}.uploading", safe_name, Uuid::new_v4());
+    let temp_path = state.config.input_dir.join(temp_name);
+
+    fs::write(&temp_path, text.as_bytes()).await?;
+    fs::rename(&temp_path, &final_path).await?;
+    let job = state.enqueue_path(final_path)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadResponse { jobs: vec![job] }),
+    ))
+}
+
+fn parse_text_upload(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(String, Option<String>), ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+
+    if content_type
+        .split(';')
+        .next()
+        .map(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        .unwrap_or(false)
+    {
+        let request: TextUploadRequest = serde_json::from_slice(body)
+            .map_err(|error| ApiError::bad_request(format!("invalid JSON text upload: {error}")))?;
+        return Ok((request.text, request.filename));
+    }
+
+    let text = std::str::from_utf8(body)
+        .map_err(|error| ApiError::bad_request(format!("text upload must be UTF-8: {error}")))?
+        .to_string();
+    Ok((text, None))
+}
+
+fn text_upload_filename(filename: Option<&str>) -> String {
+    let fallback = format!("text-drop-{}.txt", Utc::now().format("%Y%m%d%H%M%S"));
+    let safe_name = sanitize_filename(filename.unwrap_or(&fallback));
+    let extension = StdPath::new(&safe_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    if matches!(extension.as_deref(), Some("txt" | "text" | "url" | "urls")) {
+        safe_name
+    } else {
+        format!("{safe_name}.txt")
+    }
 }
 
 async fn list_jobs(State(state): State<AppState>) -> Json<JobsResponse> {
@@ -260,6 +335,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn text_endpoint_stores_plain_text_and_returns_job() {
+        let temp = tempdir().unwrap();
+        let config = test_config(temp.path());
+        config.ensure_dirs().unwrap();
+        let input_dir = config.input_dir.clone();
+        let (state, _rx) = build_state(config);
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/text")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"text":"https://example.com/watch\n","filename":"links.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["jobs"][0]["filename"], "links.txt");
+        assert_eq!(
+            fs::read_to_string(input_dir.join("links.txt"))
+                .await
+                .unwrap(),
+            "https://example.com/watch\n"
+        );
+    }
+
     fn test_config(root: &Path) -> Config {
         Config {
             input_dir: root.join("input"),
@@ -280,6 +390,10 @@ mod tests {
             pdf_render_dpi: 150,
             pdf_auto_orient: true,
             pdf_auto_orient_cli: "pdf-page-auto-orient".to_string(),
+            url_max_per_text: 8,
+            yt_dlp_cli: "yt-dlp".to_string(),
+            headless_browser_cli: "chromium".to_string(),
+            webpage_capture_virtual_time_ms: 5_000,
             video_min_frames: 3,
             video_max_frames: 24,
             video_scene_threshold: 0.35,

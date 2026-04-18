@@ -37,6 +37,7 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
+      chromium \
       ffmpeg \
       libopenblas0-pthread \
       libopencv-core406 \
@@ -45,6 +46,9 @@ RUN apt-get update \
       libreoffice \
       pandoc \
       poppler-utils \
+      python3 \
+      python3-pip \
+    && python3 -m pip install --no-cache-dir --break-system-packages --upgrade yt-dlp \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=app-builder /app/target/release/universal-drop /usr/local/bin/universal-drop
@@ -71,6 +75,10 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     PDF_RENDER_DPI=150 \
     PDF_AUTO_ORIENT=true \
     PDF_AUTO_ORIENT_CLI=pdf-page-auto-orient \
+    URL_MAX_PER_TEXT=8 \
+    YT_DLP_CLI=yt-dlp \
+    HEADLESS_BROWSER_CLI=chromium \
+    WEBPAGE_CAPTURE_VIRTUAL_TIME_MS=5000 \
     VIDEO_MIN_FRAMES=3 \
     VIDEO_MAX_FRAMES=24 \
     VIDEO_SCENE_THRESHOLD=0.35 \

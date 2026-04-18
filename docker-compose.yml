@@ -22,6 +22,10 @@ services:
       PDF_RENDER_DPI: 150
       PDF_AUTO_ORIENT: "true"
       PDF_AUTO_ORIENT_CLI: pdf-page-auto-orient
+      URL_MAX_PER_TEXT: 8
+      YT_DLP_CLI: yt-dlp
+      HEADLESS_BROWSER_CLI: chromium
+      WEBPAGE_CAPTURE_VIRTUAL_TIME_MS: 5000
       VIDEO_MIN_FRAMES: 3
       VIDEO_MAX_FRAMES: 24
       VIDEO_SCENE_THRESHOLD: 0.35

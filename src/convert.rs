@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
+    io,
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -28,6 +29,9 @@ pub enum ConversionRoute {
 pub async fn convert_to_markdown(path: &Path, config: &Config, client: &Client) -> Result<String> {
     let route = detect_route(path);
     let markdown = match route {
+        ConversionRoute::PlainText if should_autodetect_urls(path) => {
+            plain_text_to_markdown(path, config, client).await?
+        }
         ConversionRoute::PlainText | ConversionRoute::Markdown => read_text_markdown(path).await?,
         ConversionRoute::Csv(delimiter) => {
             csv_to_markdown(path, delimiter, config.max_csv_rows).await?
@@ -104,6 +108,247 @@ pub async fn read_text_markdown(path: &Path) -> Result<String> {
         .await
         .with_context(|| format!("failed to read text file {}", path.display()))?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn should_autodetect_urls(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "txt" | "text" | "url" | "urls"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn plain_text_to_markdown(path: &Path, config: &Config, client: &Client) -> Result<String> {
+    let text = read_text_markdown(path).await?;
+    let urls = extract_urls(&text);
+    if urls.is_empty() || config.url_max_per_text == 0 {
+        return Ok(text);
+    }
+
+    let mut output = String::new();
+    output.push_str("# Text drop\n\n");
+    if !text.trim().is_empty() {
+        output.push_str("## Original text\n\n");
+        output.push_str(text.trim());
+        output.push_str("\n\n");
+    }
+
+    let total_urls = urls.len();
+    let selected_urls = urls.into_iter().take(config.url_max_per_text);
+    for (index, url) in selected_urls.enumerate() {
+        output.push_str(&format!("## Detected URL {}\n\n", index + 1));
+        match url_to_markdown(&url, config, client).await {
+            Ok(markdown) => {
+                output.push_str(markdown.trim());
+                output.push_str("\n\n");
+            }
+            Err(error) => {
+                output.push_str(&format!(
+                    "_URL conversion failed; source URL omitted from output: {error:#}_\n\n"
+                ));
+            }
+        }
+    }
+
+    if total_urls > config.url_max_per_text {
+        output.push_str(&format!(
+            "_Skipped {} additional detected URLs because URL_MAX_PER_TEXT is {}._\n\n",
+            total_urls - config.url_max_per_text,
+            config.url_max_per_text
+        ));
+    }
+
+    Ok(output)
+}
+
+fn extract_urls(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for token in text.split_whitespace() {
+        let Some(url) = normalize_url_token(token) else {
+            continue;
+        };
+        if !urls.iter().any(|existing| existing == &url) {
+            urls.push(url);
+        }
+    }
+    urls
+}
+
+fn normalize_url_token(token: &str) -> Option<String> {
+    let trimmed = token
+        .trim_matches(|ch| matches!(ch, '<' | '>' | '"' | '\'' | '(' | '[' | '{'))
+        .trim_end_matches(|ch| matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'));
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+async fn url_to_markdown(url: &str, config: &Config, client: &Client) -> Result<String> {
+    if let Some(markdown) = try_yt_dlp_to_markdown(url, config, client).await? {
+        return Ok(markdown);
+    }
+
+    webpage_to_markdown(url, config, client).await
+}
+
+async fn try_yt_dlp_to_markdown(
+    url: &str,
+    config: &Config,
+    client: &Client,
+) -> Result<Option<String>> {
+    let workdir = tempdir().context("failed to create temporary URL download directory")?;
+    let output_template = workdir.path().join("download.%(ext)s");
+    let args = vec![
+        OsString::from("--no-progress"),
+        OsString::from("--no-warnings"),
+        OsString::from("--no-playlist"),
+        OsString::from("--merge-output-format"),
+        OsString::from("mp4"),
+        OsString::from("-o"),
+        output_template.as_os_str().to_os_string(),
+        OsString::from(url),
+    ];
+
+    match run_private_command_status(&config.yt_dlp_cli, &args, "yt-dlp media download").await? {
+        PrivateCommandStatus::Success => {}
+        PrivateCommandStatus::NotFound => {
+            warn!(
+                program = %config.yt_dlp_cli,
+                "yt-dlp executable is unavailable; falling back to webpage capture"
+            );
+            return Ok(None);
+        }
+        PrivateCommandStatus::Failed => return Ok(None),
+    }
+
+    let downloaded_files = collect_downloaded_files(workdir.path()).await?;
+    for downloaded_file in downloaded_files {
+        match detect_route(&downloaded_file) {
+            ConversionRoute::Video => {
+                return video_to_markdown(&downloaded_file, config, client)
+                    .await
+                    .map(Some);
+            }
+            ConversionRoute::Audio => {
+                return audio_to_markdown(&downloaded_file, config).await.map(Some);
+            }
+            ConversionRoute::Pdf => {
+                return pdf_to_markdown(&downloaded_file, config, client)
+                    .await
+                    .map(Some);
+            }
+            ConversionRoute::PlainText | ConversionRoute::Markdown => {
+                return read_text_markdown(&downloaded_file).await.map(Some);
+            }
+            ConversionRoute::Csv(_) | ConversionRoute::Office | ConversionRoute::Unsupported => {}
+        }
+    }
+
+    Ok(None)
+}
+
+async fn collect_downloaded_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<(u64, PathBuf)> = Vec::new();
+    let mut entries = fs::read_dir(dir)
+        .await
+        .with_context(|| format!("failed to read URL download directory {}", dir.display()))?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let metadata = entry.metadata().await?;
+        if !metadata.is_file() || is_partial_or_sidecar_download(&path) {
+            continue;
+        }
+        files.push((metadata.len(), path));
+    }
+    files.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(files.into_iter().map(|(_, path)| path).collect())
+}
+
+fn is_partial_or_sidecar_download(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return true;
+    };
+    if file_name.starts_with('.') {
+        return true;
+    }
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some("part" | "ytdl" | "tmp" | "json" | "description" | "vtt" | "srt")
+    )
+}
+
+async fn webpage_to_markdown(url: &str, config: &Config, client: &Client) -> Result<String> {
+    let workdir = tempdir().context("failed to create temporary webpage capture directory")?;
+    let pdf_path = workdir.path().join("webpage.pdf");
+    capture_webpage_to_pdf(url, &pdf_path, config).await?;
+    if !fs::try_exists(&pdf_path).await? {
+        bail!("headless browser did not create a webpage capture PDF");
+    }
+    pdf_to_markdown(&pdf_path, config, client).await
+}
+
+async fn capture_webpage_to_pdf(url: &str, output_path: &Path, config: &Config) -> Result<()> {
+    let args = vec![
+        OsString::from("--headless=new"),
+        OsString::from("--disable-gpu"),
+        OsString::from("--disable-dev-shm-usage"),
+        OsString::from("--disable-extensions"),
+        OsString::from("--no-first-run"),
+        OsString::from("--no-default-browser-check"),
+        OsString::from("--no-sandbox"),
+        OsString::from("--hide-scrollbars"),
+        OsString::from("--run-all-compositor-stages-before-draw"),
+        OsString::from(format!(
+            "--virtual-time-budget={}",
+            config.webpage_capture_virtual_time_ms
+        )),
+        OsString::from("--no-pdf-header-footer"),
+        OsString::from(format!("--print-to-pdf={}", output_path.display())),
+        OsString::from(url),
+    ];
+
+    for candidate in headless_browser_candidates(&config.headless_browser_cli) {
+        match run_private_command_status(&candidate, &args, "headless webpage capture").await? {
+            PrivateCommandStatus::Success => return Ok(()),
+            PrivateCommandStatus::NotFound => continue,
+            PrivateCommandStatus::Failed => {
+                bail!("headless browser failed to capture webpage; source URL omitted")
+            }
+        }
+    }
+
+    bail!(
+        "headless browser executable not found; set HEADLESS_BROWSER_CLI to chromium or chromium-browser"
+    )
+}
+
+fn headless_browser_candidates(configured: &str) -> Vec<String> {
+    let configured = configured.trim();
+    let mut candidates = Vec::new();
+    if !configured.is_empty() {
+        candidates.push(configured.to_string());
+    }
+    for fallback in [
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+    ] {
+        if !candidates.iter().any(|candidate| candidate == fallback) {
+            candidates.push(fallback.to_string());
+        }
+    }
+    candidates
 }
 
 pub async fn csv_to_markdown(path: &Path, delimiter: u8, max_rows: usize) -> Result<String> {
@@ -754,6 +999,49 @@ async fn libreoffice_to_text(path: &Path) -> Result<String> {
     Ok(format!("```text\n{}\n```\n", text.trim()))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrivateCommandStatus {
+    Success,
+    Failed,
+    NotFound,
+}
+
+async fn run_private_command_status(
+    program: &str,
+    args: &[OsString],
+    description: &str,
+) -> Result<PrivateCommandStatus> {
+    let output = match Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(PrivateCommandStatus::NotFound);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to execute {program} for {description}; source URL omitted")
+            });
+        }
+    };
+
+    if output.status.success() {
+        Ok(PrivateCommandStatus::Success)
+    } else {
+        debug!(
+            program,
+            status = %output.status,
+            description,
+            "URL command failed; stdout/stderr omitted to avoid logging private URLs"
+        );
+        Ok(PrivateCommandStatus::Failed)
+    }
+}
+
 async fn run_command(program: &str, args: &[OsString]) -> Result<()> {
     let output = Command::new(program)
         .args(args)
@@ -799,8 +1087,8 @@ fn ensure_success(program: &str, args: &[OsString], output: &std::process::Outpu
 #[cfg(test)]
 mod tests {
     use super::{
-        ConversionRoute, csv_bytes_to_markdown, detect_route, fallback_frame_timestamps,
-        normalize_markdown,
+        ConversionRoute, csv_bytes_to_markdown, detect_route, extract_urls,
+        fallback_frame_timestamps, normalize_markdown, should_autodetect_urls,
     };
     use std::path::Path;
 
@@ -858,5 +1146,27 @@ mod tests {
     fn fallback_timestamps_are_evenly_spaced_inside_duration() {
         let timestamps = fallback_frame_timestamps(Some(12.0), 3);
         assert_eq!(timestamps, vec![3.0, 6.0, 9.0]);
+    }
+
+    #[test]
+    fn extracts_http_urls_from_text_tokens() {
+        let urls = extract_urls(
+            "Please process (https://example.com/watch?id=1), and https://example.org/a.",
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/watch?id=1".to_string(),
+                "https://example.org/a".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn only_plain_url_text_files_autodetect_urls() {
+        assert!(should_autodetect_urls(Path::new("links.txt")));
+        assert!(should_autodetect_urls(Path::new("recording.url")));
+        assert!(!should_autodetect_urls(Path::new("notes.md")));
+        assert!(!should_autodetect_urls(Path::new("script.ts")));
     }
 }
