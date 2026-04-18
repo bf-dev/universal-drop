@@ -10,6 +10,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 - Moves successfully converted originals to `ARCHIVE_DIR`.
 - Leaves failed inputs in place and exposes the error through `/jobs/{id}`.
 - OCRs every PDF page through Ollama using `glm-ocr` with `keep_alive: "30m"`.
+- Auto-detects and corrects whole-page PDF render orientation with native OpenCV before OCR, rotating only by 90/180/270 degrees when confidence is high enough. It never performs small-angle deskew rotations.
 - Runs `whisper.cpp` only as a subprocess during audio transcription jobs, with CPU-native/OpenBLAS build acceleration and fast large-v3 decoding defaults.
 - Converts videos into Markdown by transcribing audio with Whisper large-v3 and analyzing only selected significant visual frames with local Ollama.
 
@@ -19,7 +20,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 | --- | --- |
 | `.txt`, `.md`, code/config text files | Normalize to Markdown text. |
 | `.csv`, `.tsv` | Convert to a Markdown table, capped by `MAX_CSV_ROWS`. |
-| `.pdf` | Render every page with Poppler and OCR each page with Ollama `glm-ocr`; default render DPI is tuned lower for CPU OCR speed. |
+| `.pdf` | Render every page with Poppler, auto-orient whole upside-down/sideways page renders with native OpenCV when necessary, and OCR each page with Ollama `glm-ocr`; default render DPI is tuned lower for CPU OCR speed. |
 | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, etc. | Normalize with `ffmpeg`, transcribe with `whisper.cpp`, then write a transcript Markdown file. |
 | `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, etc. | Extract audio for Whisper large-v3, use FFmpeg scene-change detection plus sparse fallback samples, compare selected frames through local Ollama, and write a bounded Markdown summary. |
 | `.doc`, `.docx`, `.odt`, `.pptx`, `.xlsx`, etc. | Try Pandoc first, then headless LibreOffice text conversion. |
@@ -113,6 +114,8 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `WHISPER_BEST_OF` | `1` | Faster decoding candidate count. |
 | `WHISPER_NO_FALLBACK` | `true` | Disable temperature fallback retries for speed. |
 | `PDF_RENDER_DPI` | `150` | PDF page render DPI before OCR; higher values may improve tiny text but slow CPU OCR. |
+| `PDF_AUTO_ORIENT` | `true` | Run native OpenCV page-orientation detection before PDF OCR. Only 90/180/270-degree whole-page rotations are applied; small skew angles under the page-rotation threshold are not changed. |
+| `PDF_AUTO_ORIENT_CLI` | `pdf-page-auto-orient` | OpenCV helper executable used for PDF page orientation detection and safe rotation. |
 | `VIDEO_MIN_FRAMES` | `3` | Minimum selected visual frames for video analysis; fallback samples are added when scene detection finds too few. |
 | `VIDEO_MAX_FRAMES` | `24` | Hard cap on selected visual frames to prevent oversized output and overload. |
 | `VIDEO_SCENE_THRESHOLD` | `0.35` | FFmpeg scene-change threshold from `0.0` to `1.0`; lower values select more frames. |

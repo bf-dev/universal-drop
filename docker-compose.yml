@@ -20,6 +20,8 @@ services:
       WHISPER_BEST_OF: 1
       WHISPER_NO_FALLBACK: "true"
       PDF_RENDER_DPI: 150
+      PDF_AUTO_ORIENT: "true"
+      PDF_AUTO_ORIENT_CLI: pdf-page-auto-orient
       VIDEO_MIN_FRAMES: 3
       VIDEO_MAX_FRAMES: 24
       VIDEO_SCENE_THRESHOLD: 0.35

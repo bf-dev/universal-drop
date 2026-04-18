@@ -11,6 +11,7 @@ use std::{
 };
 use tempfile::tempdir;
 use tokio::{fs, process::Command};
+use tracing::{debug, info, warn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversionRoute {
@@ -177,6 +178,7 @@ async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Resul
     if pages.is_empty() {
         bail!("pdftoppm produced no images for {}", path.display());
     }
+    auto_orient_pdf_pages(&pages, config).await?;
 
     let title = path
         .file_name()
@@ -226,6 +228,95 @@ async fn render_pdf_pages(path: &Path, output_dir: &Path, dpi: usize) -> Result<
     }
     pages.sort();
     Ok(pages)
+}
+
+#[derive(Debug, Deserialize)]
+struct PageOrientationResult {
+    rotation: i32,
+    confidence: Option<f64>,
+    reason: Option<String>,
+}
+
+async fn auto_orient_pdf_pages(pages: &[PathBuf], config: &Config) -> Result<()> {
+    if !config.pdf_auto_orient {
+        return Ok(());
+    }
+
+    for (index, page_path) in pages.iter().enumerate() {
+        auto_orient_pdf_page(page_path, index + 1, config).await?;
+    }
+    Ok(())
+}
+
+async fn auto_orient_pdf_page(page_path: &Path, page_number: usize, config: &Config) -> Result<()> {
+    let stem = page_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("page");
+    let oriented_path = page_path.with_file_name(format!("{stem}.oriented.jpg"));
+    let args = vec![
+        page_path.as_os_str().to_os_string(),
+        oriented_path.as_os_str().to_os_string(),
+    ];
+
+    let stdout = match run_command_output(&config.pdf_auto_orient_cli, &args).await {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            warn!(
+                page = page_number,
+                path = %page_path.display(),
+                error = %error,
+                "PDF page auto-orientation failed; keeping original render"
+            );
+            let _ = fs::remove_file(&oriented_path).await;
+            return Ok(());
+        }
+    };
+
+    let result = match serde_json::from_str::<PageOrientationResult>(stdout.trim()) {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(
+                page = page_number,
+                path = %page_path.display(),
+                stdout = %stdout.trim(),
+                error = %error,
+                "PDF page auto-orientation returned invalid metadata; keeping original render"
+            );
+            let _ = fs::remove_file(&oriented_path).await;
+            return Ok(());
+        }
+    };
+
+    if result.rotation == 0 {
+        debug!(
+            page = page_number,
+            path = %page_path.display(),
+            confidence = result.confidence.unwrap_or_default(),
+            reason = result.reason.as_deref().unwrap_or("unknown"),
+            "PDF page auto-orientation kept original orientation"
+        );
+        let _ = fs::remove_file(&oriented_path).await;
+        return Ok(());
+    }
+
+    fs::rename(&oriented_path, page_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to replace auto-oriented page {}",
+                page_path.display()
+            )
+        })?;
+    info!(
+        page = page_number,
+        rotation = result.rotation,
+        confidence = result.confidence.unwrap_or_default(),
+        reason = result.reason.as_deref().unwrap_or("unknown"),
+        path = %page_path.display(),
+        "auto-rotated PDF page before OCR"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]

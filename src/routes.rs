@@ -278,6 +278,8 @@ mod tests {
             whisper_best_of: 1,
             whisper_no_fallback: true,
             pdf_render_dpi: 150,
+            pdf_auto_orient: true,
+            pdf_auto_orient_cli: "pdf-page-auto-orient".to_string(),
             video_min_frames: 3,
             video_max_frames: 24,
             video_scene_threshold: 0.35,

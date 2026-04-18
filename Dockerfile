@@ -21,12 +21,27 @@ RUN cmake -B build \
     && mkdir -p /out \
     && install -m 0755 "$(find build -type f -name whisper-cli | head -n 1)" /out/whisper-cli
 
+FROM debian:bookworm-slim AS page-orient-builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates g++ libopencv-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY tools/pdf-page-auto-orient.cpp ./pdf-page-auto-orient.cpp
+RUN g++ -O3 -DNDEBUG -std=c++17 pdf-page-auto-orient.cpp \
+      -o /usr/local/bin/pdf-page-auto-orient \
+      $(pkg-config --cflags --libs opencv4) \
+    && mkdir -p /out \
+    && install -m 0755 /usr/local/bin/pdf-page-auto-orient /out/pdf-page-auto-orient
+
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
       ffmpeg \
       libopenblas0-pthread \
+      libopencv-core406 \
+      libopencv-imgcodecs406 \
+      libopencv-imgproc406 \
       libreoffice \
       pandoc \
       poppler-utils \
@@ -34,6 +49,7 @@ RUN apt-get update \
 
 COPY --from=app-builder /app/target/release/universal-drop /usr/local/bin/universal-drop
 COPY --from=whisper-builder /out/whisper-cli /usr/local/bin/whisper-cli
+COPY --from=page-orient-builder /out/pdf-page-auto-orient /usr/local/bin/pdf-page-auto-orient
 
 RUN mkdir -p /data/input /data/results /data/archive /models/whisper
 
@@ -53,6 +69,8 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     WHISPER_BEST_OF=1 \
     WHISPER_NO_FALLBACK=true \
     PDF_RENDER_DPI=150 \
+    PDF_AUTO_ORIENT=true \
+    PDF_AUTO_ORIENT_CLI=pdf-page-auto-orient \
     VIDEO_MIN_FRAMES=3 \
     VIDEO_MAX_FRAMES=24 \
     VIDEO_SCENE_THRESHOLD=0.35 \

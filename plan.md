@@ -27,6 +27,7 @@ Build a greenfield Rust + Docker project that converts dropped/uploaded files in
     - mounted `~/Documents/universal-drop-input:/data/input`, `~/Documents/notes/ai_process_dump:/data/results`, `~/Documents/universal-drop-archive:/data/archive`, and model/cache volumes.
     - `OLLAMA_KEEP_ALIVE=30m` and app requests using `keep_alive: "30m"` for `glm-ocr`.
     - Whisper CPU speed settings for M1/Asahi: native/OpenBLAS build, 8 threads, beam size 1, best-of 1, and no fallback retries.
+    - Native OpenCV helper for PDF page auto-orientation before OCR, rotating only whole pages by 90/180/270 degrees when confident; no small-angle deskew under 45-50 degrees.
 - Add repo hygiene:
   - `.gitignore` including `.env`, `.env.*`, `.secrets/`, logs/cache/build outputs, OS/IDE files, `node_modules/`, `target/`, and `DEPLOYMENT.md`.
   - `README.md` with local Docker usage.
@@ -91,6 +92,7 @@ Build a greenfield Rust + Docker project that converts dropped/uploaded files in
 - Default Whisper model is multilingual `large-v3`, configurable by environment variable.
 - Default video frame budget is 3 to 24 selected frames with a 0.35 scene threshold.
 - Default PDF render DPI is 150 to reduce CPU OCR image cost.
+- Default PDF auto-orientation is enabled with native OpenCV and conservative whole-page rotation thresholds.
 - Dockerized Ollama is configured for experimental Vulkan opt-in and `/dev/dri` passthrough, but current arm64 Ollama on this Apple GPU stack still falls back to CPU; OCR acceleration is therefore CPU-oriented unless Ollama gains a usable Vulkan backend here.
 - PDF OCR is always used, not text-first fallback.
 - Concurrency is one conversion job at a time.
