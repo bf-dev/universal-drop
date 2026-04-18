@@ -42,7 +42,7 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     OLLAMA_MODEL=glm-ocr \
     OLLAMA_KEEP_ALIVE=5m \
     WHISPER_CLI=whisper-cli \
-    WHISPER_MODEL_PATH=/models/whisper/ggml-small.bin \
+    WHISPER_MODEL_PATH=/models/whisper/ggml-large-v3.bin \
     RUST_LOG=info
 
 EXPOSE 8080

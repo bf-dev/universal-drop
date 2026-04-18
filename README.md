@@ -37,10 +37,10 @@ APP_PORT=9360 docker compose up --build -d
 docker compose exec ollama ollama pull glm-ocr
 ```
 
-Place a whisper.cpp-compatible multilingual small model at:
+Place a whisper.cpp-compatible multilingual large-v3 model at:
 
 ```text
-~/Documents/universal-drop-models/whisper/ggml-small.bin
+~/Documents/universal-drop-models/whisper/ggml-large-v3.bin
 ```
 
 Then drop files into `~/Documents/universal-drop-input` or upload through the API. Successful Markdown output appears in `~/Documents/notes/ai_process_dump`; originals move to `~/Documents/universal-drop-archive`.
@@ -103,7 +103,7 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `OLLAMA_MODEL` | `glm-ocr` | Multimodal OCR model. |
 | `OLLAMA_KEEP_ALIVE` | `5m` | Sent in PDF OCR requests and mirrored in compose for Ollama. |
 | `WHISPER_CLI` | `whisper-cli` | whisper.cpp CLI executable. |
-| `WHISPER_MODEL_PATH` | `/models/whisper/ggml-small.bin` | Mounted Whisper model path. |
+| `WHISPER_MODEL_PATH` | `/models/whisper/ggml-large-v3.bin` | Mounted Whisper model path. |
 | `MAX_CSV_ROWS` | `1000` | CSV/TSV Markdown row cap. |
 | `FILE_STABILITY_CHECKS` | `3` | Number of stable metadata checks before processing a dropped file. |
 | `FILE_STABILITY_DELAY_MS` | `500` | Delay between file-stability checks. |

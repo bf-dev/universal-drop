@@ -12,7 +12,7 @@ services:
       OLLAMA_MODEL: glm-ocr
       OLLAMA_KEEP_ALIVE: 5m
       WHISPER_CLI: whisper-cli
-      WHISPER_MODEL_PATH: /models/whisper/ggml-small.bin
+      WHISPER_MODEL_PATH: /models/whisper/ggml-large-v3.bin
       RUST_LOG: info
     volumes:
       - ${DROP_INPUT_DIR:-/home/bfdev/Documents/universal-drop-input}:/data/input

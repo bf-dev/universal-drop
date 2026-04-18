@@ -269,7 +269,7 @@ mod tests {
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "glm-ocr".to_string(),
             ollama_keep_alive: "5m".to_string(),
-            whisper_model_path: root.join("models/ggml-small.bin"),
+            whisper_model_path: root.join("models/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
             max_csv_rows: 1_000,
             file_stability_checks: 1,

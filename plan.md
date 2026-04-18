@@ -51,7 +51,7 @@ Build a greenfield Rust + Docker project that converts dropped/uploaded files in
 - Audio handling:
   - Use `ffmpeg` to normalize/extract audio.
   - Invoke `whisper.cpp` CLI as a subprocess per audio job.
-  - Configure model path through `WHISPER_MODEL_PATH`, defaulting to a mounted multilingual small model path.
+  - Configure model path through `WHISPER_MODEL_PATH`, defaulting to a mounted multilingual large-v3 model path.
   - Do not run Whisper as a long-lived server.
 - Document handling:
   - Plain text/Markdown: copy/normalize to Markdown.
@@ -80,7 +80,7 @@ Build a greenfield Rust + Docker project that converts dropped/uploaded files in
 
 ## Assumptions and Defaults
 - Default result artifact is only the user-facing Markdown file; job metadata is internal.
-- Default Whisper model is multilingual `small`, configurable by environment variable.
+- Default Whisper model is multilingual `large-v3`, configurable by environment variable.
 - PDF OCR is always used, not text-first fallback.
 - Concurrency is one conversion job at a time.
 - Ollama unload policy follows Ollama's documented default/`keep_alive` behavior: models are kept in memory for 5 minutes unless configured otherwise. Source: https://github.com/ollama/ollama/blob/main/docs/faq.mdx
