@@ -1,0 +1,37 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      INPUT_DIR: /data/input
+      RESULTS_DIR: /data/results
+      ARCHIVE_DIR: /data/archive
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: glm-ocr
+      OLLAMA_KEEP_ALIVE: 5m
+      WHISPER_CLI: whisper-cli
+      WHISPER_MODEL_PATH: /models/whisper/ggml-small.bin
+      RUST_LOG: info
+    volumes:
+      - ./input:/data/input
+      - ./results:/data/results
+      - ./archive:/data/archive
+      - ./models/whisper:/models/whisper:ro
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_KEEP_ALIVE: 5m
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama-data:

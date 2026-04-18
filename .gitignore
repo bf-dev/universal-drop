@@ -1,0 +1,35 @@
+# Secrets and local configuration
+.env
+.env.*
+.secrets/
+DEPLOYMENT.md
+
+# Rust build output
+/target/
+
+# Runtime data volumes
+/input/
+/results/
+/archive/
+/models/
+/tmp/
+
+# Logs and cache
+*.log
+logs/
+.cache/
+.cache*/
+*.tmp
+*.part
+*.uploading
+
+# Node/tooling artifacts
+node_modules/
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

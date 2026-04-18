@@ -1,0 +1,14 @@
+.git
+.gitignore
+.dockerignore
+/target
+/input
+/results
+/archive
+/models
+/tmp
+.env
+.env.*
+.secrets
+DEPLOYMENT.md
+*.log

@@ -1,0 +1,115 @@
+# Universal Drop
+
+Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a small HTTP API for converting dropped or uploaded files into LLM-ready Markdown.
+
+## What it does
+
+- Watches `INPUT_DIR` and scans it at startup.
+- Processes one job at a time to keep memory usage predictable.
+- Writes Markdown results to `RESULTS_DIR/<original-name>.md`.
+- Moves successfully converted originals to `ARCHIVE_DIR`.
+- Leaves failed inputs in place and exposes the error through `/jobs/{id}`.
+- OCRs every PDF page through Ollama using `glm-ocr` with `keep_alive: "5m"`.
+- Runs `whisper.cpp` only as a subprocess during audio transcription jobs.
+
+## Supported inputs
+
+| Kind | Behavior |
+| --- | --- |
+| `.txt`, `.md`, code/config text files | Normalize to Markdown text. |
+| `.csv`, `.tsv` | Convert to a Markdown table, capped by `MAX_CSV_ROWS`. |
+| `.pdf` | Render every page with Poppler and OCR each page with Ollama `glm-ocr`. |
+| `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, etc. | Normalize with `ffmpeg`, transcribe with `whisper.cpp`, then write a transcript Markdown file. |
+| `.doc`, `.docx`, `.odt`, `.pptx`, `.xlsx`, etc. | Try Pandoc first, then headless LibreOffice text conversion. |
+| Unknown binary files | Mark the job failed with an unsupported-type error. |
+
+## Local Docker usage
+
+```bash
+mkdir -p input results archive models/whisper
+
+docker compose up --build -d
+
+docker compose exec ollama ollama pull glm-ocr
+```
+
+Place a whisper.cpp-compatible multilingual small model at:
+
+```text
+models/whisper/ggml-small.bin
+```
+
+Then drop files into `./input` or upload through the API. Successful Markdown output appears in `./results`; originals move to `./archive`.
+
+## API
+
+### Health
+
+```bash
+curl http://localhost:8080/health
+```
+
+### Upload a file
+
+```bash
+curl -F "file=@./example.pdf" http://localhost:8080/files
+```
+
+The response includes the queued job ID.
+
+### List jobs
+
+```bash
+curl http://localhost:8080/jobs
+```
+
+### Inspect one job
+
+```bash
+curl http://localhost:8080/jobs/<job-id>
+```
+
+### Fetch a finished Markdown result
+
+```bash
+curl http://localhost:8080/jobs/<job-id>/result
+```
+
+If the job is not complete, the endpoint returns `409 Conflict`.
+
+## Environment variables
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `BIND_ADDR` | `0.0.0.0:8080` | HTTP listen address. |
+| `INPUT_DIR` | `/data/input` | Watched/drop folder. |
+| `RESULTS_DIR` | `/data/results` | Markdown output folder. |
+| `ARCHIVE_DIR` | `/data/archive` | Successful-original archive. |
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | Local Ollama API base URL. The app currently targets local HTTP Ollama. |
+| `OLLAMA_MODEL` | `glm-ocr` | Multimodal OCR model. |
+| `OLLAMA_KEEP_ALIVE` | `5m` | Sent in PDF OCR requests and mirrored in compose for Ollama. |
+| `WHISPER_CLI` | `whisper-cli` | whisper.cpp CLI executable. |
+| `WHISPER_MODEL_PATH` | `/models/whisper/ggml-small.bin` | Mounted Whisper model path. |
+| `MAX_CSV_ROWS` | `1000` | CSV/TSV Markdown row cap. |
+| `FILE_STABILITY_CHECKS` | `3` | Number of stable metadata checks before processing a dropped file. |
+| `FILE_STABILITY_DELAY_MS` | `500` | Delay between file-stability checks. |
+
+## Development
+
+```bash
+cargo fmt --all
+cargo test
+cargo run
+```
+
+For local non-Docker runs, set the data directories explicitly:
+
+```bash
+INPUT_DIR=./input RESULTS_DIR=./results ARCHIVE_DIR=./archive OLLAMA_BASE_URL=http://localhost:11434 cargo run
+```
+
+## Notes
+
+- PDF conversion always uses OCR; there is intentionally no text-first fallback in the MVP.
+- The job store is in-memory for this MVP. Restarting the service clears job metadata, but existing input files are scanned again on startup.
+- Uploads are written to hidden `.uploading` files first, then atomically renamed so the watcher does not process partial uploads.
