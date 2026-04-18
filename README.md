@@ -26,7 +26,11 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 ## Local Docker usage
 
 ```bash
-mkdir -p input results archive models/whisper
+mkdir -p \
+  ~/Documents/universal-drop-input \
+  ~/Documents/notes/ai_process_dump \
+  ~/Documents/universal-drop-archive \
+  ~/Documents/universal-drop-models/whisper
 
 APP_PORT=9360 docker compose up --build -d
 
@@ -36,10 +40,20 @@ docker compose exec ollama ollama pull glm-ocr
 Place a whisper.cpp-compatible multilingual small model at:
 
 ```text
-models/whisper/ggml-small.bin
+~/Documents/universal-drop-models/whisper/ggml-small.bin
 ```
 
-Then drop files into `./input` or upload through the API. Successful Markdown output appears in `./results`; originals move to `./archive`.
+Then drop files into `~/Documents/universal-drop-input` or upload through the API. Successful Markdown output appears in `~/Documents/notes/ai_process_dump`; originals move to `~/Documents/universal-drop-archive`.
+
+The three mounted data folders are configurable through Compose variables:
+
+| Compose variable | Default host directory | Container path |
+| --- | --- | --- |
+| `DROP_INPUT_DIR` | `/home/bfdev/Documents/universal-drop-input` | `/data/input` |
+| `DROP_RESULTS_DIR` | `/home/bfdev/Documents/notes/ai_process_dump` | `/data/results` |
+| `DROP_ARCHIVE_DIR` | `/home/bfdev/Documents/universal-drop-archive` | `/data/archive` |
+
+`WHISPER_MODELS_DIR` defaults to `/home/bfdev/Documents/universal-drop-models/whisper` for the optional Whisper model mount.
 
 ## API
 
@@ -105,7 +119,11 @@ cargo run
 For local non-Docker runs, set the data directories explicitly:
 
 ```bash
-INPUT_DIR=./input RESULTS_DIR=./results ARCHIVE_DIR=./archive OLLAMA_BASE_URL=http://localhost:11434 cargo run
+INPUT_DIR=~/Documents/universal-drop-input \
+RESULTS_DIR=~/Documents/notes/ai_process_dump \
+ARCHIVE_DIR=~/Documents/universal-drop-archive \
+OLLAMA_BASE_URL=http://localhost:11434 \
+cargo run
 ```
 
 ## Notes

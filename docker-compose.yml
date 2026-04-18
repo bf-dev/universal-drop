@@ -15,10 +15,10 @@ services:
       WHISPER_MODEL_PATH: /models/whisper/ggml-small.bin
       RUST_LOG: info
     volumes:
-      - ./input:/data/input
-      - ./results:/data/results
-      - ./archive:/data/archive
-      - ./models/whisper:/models/whisper:ro
+      - ${DROP_INPUT_DIR:-/home/bfdev/Documents/universal-drop-input}:/data/input
+      - ${DROP_RESULTS_DIR:-/home/bfdev/Documents/notes/ai_process_dump}:/data/results
+      - ${DROP_ARCHIVE_DIR:-/home/bfdev/Documents/universal-drop-archive}:/data/archive
+      - ${WHISPER_MODELS_DIR:-/home/bfdev/Documents/universal-drop-models/whisper}:/models/whisper:ro
     depends_on:
       - ollama
     restart: unless-stopped

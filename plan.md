@@ -23,7 +23,7 @@ Build a greenfield Rust + Docker project that converts dropped/uploaded files in
   - `docker-compose.yml` with:
     - `app` service.
     - `ollama` service.
-    - mounted `./input:/data/input`, `./results:/data/results`, `./archive:/data/archive`, and model/cache volumes.
+    - mounted `~/Documents/universal-drop-input:/data/input`, `~/Documents/notes/ai_process_dump:/data/results`, `~/Documents/universal-drop-archive:/data/archive`, and model/cache volumes.
     - `OLLAMA_KEEP_ALIVE=5m` and app requests using `keep_alive: "5m"` for `glm-ocr`.
 - Add repo hygiene:
   - `.gitignore` including `.env`, `.env.*`, `.secrets/`, logs/cache/build outputs, OS/IDE files, `node_modules/`, `target/`, and `DEPLOYMENT.md`.

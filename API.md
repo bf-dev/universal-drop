@@ -8,6 +8,16 @@ http://localhost:9360
 
 `docker-compose.yml` maps host port `${APP_PORT:-9360}` to container port `8080`, so set `APP_PORT` before starting Compose if you want a different host port.
 
+Current Docker defaults mount three host data directories:
+
+| Purpose | Host directory | Container directory |
+| --- | --- | --- |
+| Input/drop folder | `/home/bfdev/Documents/universal-drop-input` | `/data/input` |
+| Markdown results | `/home/bfdev/Documents/notes/ai_process_dump` | `/data/results` |
+| Successful-original archive | `/home/bfdev/Documents/universal-drop-archive` | `/data/archive` |
+
+Override them with `DROP_INPUT_DIR`, `DROP_RESULTS_DIR`, and `DROP_ARCHIVE_DIR` when starting Docker Compose.
+
 ## Health
 
 Check that the HTTP service is running.
@@ -133,10 +143,10 @@ If the job succeeded but the Markdown file is missing, the API returns `404 Not 
 You can skip the upload endpoint and drop files directly into the input volume:
 
 ```bash
-cp ./example.pdf ./input/
+cp ./example.pdf ~/Documents/universal-drop-input/
 ```
 
-The service watches the input directory, converts the file, writes Markdown to `./results/<original-name>.md`, and moves the original into `./archive/` after success.
+The service watches the input directory, converts the file, writes Markdown to `~/Documents/notes/ai_process_dump/<original-name>.md`, and moves the original into `~/Documents/universal-drop-archive/` after success.
 
 ## Conversion notes
 
