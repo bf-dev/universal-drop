@@ -480,6 +480,23 @@ struct PageOrientationResult {
     rotation: i32,
     confidence: Option<f64>,
     reason: Option<String>,
+    line_model_best_rotation: Option<i32>,
+    line_model_score_margin: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrientationOcrChoice {
+    Original,
+    Candidate,
+    Tie,
+}
+
+#[derive(Debug)]
+struct OrientationOcrConfirmation {
+    choice: OrientationOcrChoice,
+    confidence: f32,
+    original_score: f64,
+    candidate_score: f64,
 }
 
 async fn auto_orient_pdf_pages(pages: &[PathBuf], config: &Config) -> Result<()> {
@@ -545,6 +562,45 @@ async fn auto_orient_pdf_page(page_path: &Path, page_number: usize, config: &Con
         return Ok(());
     }
 
+    if config.pdf_orient_ocr_confirm {
+        match confirm_pdf_orientation_with_ocr(page_path, &oriented_path, &result, config).await {
+            Ok(confirmation) if confirmation.choice == OrientationOcrChoice::Candidate => {
+                debug!(
+                    page = page_number,
+                    rotation = result.rotation,
+                    confidence = confirmation.confidence,
+                    original_score = confirmation.original_score,
+                    candidate_score = confirmation.candidate_score,
+                    "PDF page orientation accepted by recognition-driven OCR confirmation"
+                );
+            }
+            Ok(confirmation) => {
+                info!(
+                    page = page_number,
+                    rotation = result.rotation,
+                    confidence = confirmation.confidence,
+                    original_score = confirmation.original_score,
+                    candidate_score = confirmation.candidate_score,
+                    reason = result.reason.as_deref().unwrap_or("unknown"),
+                    "PDF page auto-orientation rejected by recognition-driven OCR confirmation"
+                );
+                let _ = fs::remove_file(&oriented_path).await;
+                return Ok(());
+            }
+            Err(error) => {
+                warn!(
+                    page = page_number,
+                    rotation = result.rotation,
+                    error = %error,
+                    reason = result.reason.as_deref().unwrap_or("unknown"),
+                    "PDF page OCR orientation confirmation failed; keeping original render"
+                );
+                let _ = fs::remove_file(&oriented_path).await;
+                return Ok(());
+            }
+        }
+    }
+
     fs::rename(&oriented_path, page_path)
         .await
         .with_context(|| {
@@ -562,6 +618,189 @@ async fn auto_orient_pdf_page(page_path: &Path, page_number: usize, config: &Con
         "auto-rotated PDF page before OCR"
     );
     Ok(())
+}
+
+async fn confirm_pdf_orientation_with_ocr(
+    original_path: &Path,
+    candidate_path: &Path,
+    orientation: &PageOrientationResult,
+    config: &Config,
+) -> Result<OrientationOcrConfirmation> {
+    let original_text = tesseract_orientation_probe(original_path, config)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to OCR original page orientation probe {}",
+                original_path.display()
+            )
+        })?;
+    let candidate_text = tesseract_orientation_probe(candidate_path, config)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to OCR candidate page orientation probe {}",
+                candidate_path.display()
+            )
+        })?;
+
+    let original_score = orientation_ocr_text_score(&original_text);
+    let candidate_score = orientation_ocr_text_score(&candidate_text);
+    let max_score = original_score.max(candidate_score).max(1.0);
+    let confidence = ((candidate_score - original_score) / max_score).max(0.0) as f32;
+    let enough_signal = candidate_score >= config.pdf_orient_ocr_min_score as f64;
+    let choice = if enough_signal && confidence >= config.pdf_orient_ocr_min_confidence {
+        OrientationOcrChoice::Candidate
+    } else if original_score > candidate_score {
+        OrientationOcrChoice::Original
+    } else {
+        OrientationOcrChoice::Tie
+    };
+
+    debug!(
+        rotation = orientation.rotation,
+        helper_confidence = orientation.confidence.unwrap_or_default(),
+        helper_reason = orientation.reason.as_deref().unwrap_or("unknown"),
+        line_model_best_rotation = orientation.line_model_best_rotation.unwrap_or_default(),
+        line_model_score_margin = orientation.line_model_score_margin.unwrap_or_default(),
+        original_score,
+        candidate_score,
+        confidence,
+        "PDF orientation OCR confirmation scored candidate"
+    );
+
+    Ok(OrientationOcrConfirmation {
+        choice,
+        confidence,
+        original_score,
+        candidate_score,
+    })
+}
+
+async fn tesseract_orientation_probe(path: &Path, config: &Config) -> Result<String> {
+    let args = vec![
+        path.as_os_str().to_os_string(),
+        OsString::from("stdout"),
+        OsString::from("-l"),
+        OsString::from(&config.pdf_orient_ocr_lang),
+        OsString::from("--psm"),
+        OsString::from("6"),
+        OsString::from("tsv"),
+    ];
+    let output = Command::new(&config.pdf_orient_ocr_cli)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("failed to execute {}", config.pdf_orient_ocr_cli))?;
+    ensure_success(&config.pdf_orient_ocr_cli, &args, &output)?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn orientation_ocr_text_score(text: &str) -> f64 {
+    if text
+        .lines()
+        .next()
+        .map(|line| line.starts_with("level\t"))
+        .unwrap_or(false)
+    {
+        return orientation_ocr_tsv_score(text);
+    }
+
+    let mut non_ws = 0usize;
+    let mut signal_chars = 0usize;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        non_ws += 1;
+        if is_ocr_signal_char(ch) {
+            signal_chars += 1;
+        }
+    }
+    if non_ws == 0 || signal_chars == 0 {
+        return 0.0;
+    }
+
+    let good_tokens = text
+        .split_whitespace()
+        .filter(|token| {
+            let total = token.chars().filter(|ch| !ch.is_whitespace()).count();
+            if total == 0 {
+                return false;
+            }
+            let signal = token.chars().filter(|ch| is_ocr_signal_char(*ch)).count();
+            signal >= 2 && (signal as f64 / total as f64) >= 0.50
+        })
+        .count();
+
+    let signal_ratio = signal_chars as f64 / non_ws as f64;
+    signal_chars as f64 * signal_ratio + good_tokens as f64 * 4.0
+}
+
+fn orientation_ocr_tsv_score(tsv: &str) -> f64 {
+    let mut lines = tsv.lines();
+    let Some(header) = lines.next() else {
+        return 0.0;
+    };
+    let columns = header.split('\t').collect::<Vec<_>>();
+    let conf_index = columns.iter().position(|column| *column == "conf");
+    let text_index = columns.iter().position(|column| *column == "text");
+    let (Some(conf_index), Some(text_index)) = (conf_index, text_index) else {
+        return 0.0;
+    };
+
+    let mut good_tokens = 0usize;
+    let mut high_confidence_tokens = 0usize;
+    let mut confidence_sum = 0.0f64;
+    let mut weighted_signal = 0.0f64;
+
+    for line in lines {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() <= conf_index || fields.len() <= text_index {
+            continue;
+        }
+        let text = fields[text_index].trim();
+        if text.is_empty() {
+            continue;
+        }
+        let Ok(confidence) = fields[conf_index].parse::<f64>() else {
+            continue;
+        };
+        if confidence < 0.0 {
+            continue;
+        }
+
+        let total_chars = text.chars().filter(|ch| !ch.is_whitespace()).count();
+        if total_chars == 0 {
+            continue;
+        }
+        let signal_chars = text.chars().filter(|ch| is_ocr_signal_char(*ch)).count();
+        if signal_chars < 2 || (signal_chars as f64 / total_chars as f64) < 0.50 {
+            continue;
+        }
+
+        good_tokens += 1;
+        confidence_sum += confidence;
+        weighted_signal += (confidence / 100.0).max(0.0) * signal_chars as f64;
+        if confidence >= 55.0 {
+            high_confidence_tokens += 1;
+        }
+    }
+
+    if good_tokens == 0 {
+        return 0.0;
+    }
+
+    let average_confidence = confidence_sum / good_tokens as f64;
+    weighted_signal + high_confidence_tokens as f64 * 5.0 + average_confidence * 0.5
+}
+
+fn is_ocr_signal_char(ch: char) -> bool {
+    ch.is_alphanumeric()
+        || ('\u{ac00}'..='\u{d7af}').contains(&ch)
+        || ('\u{4e00}'..='\u{9fff}').contains(&ch)
+        || ('\u{3040}'..='\u{30ff}').contains(&ch)
 }
 
 #[derive(Debug, Serialize)]
@@ -1088,7 +1327,8 @@ fn ensure_success(program: &str, args: &[OsString], output: &std::process::Outpu
 mod tests {
     use super::{
         ConversionRoute, csv_bytes_to_markdown, detect_route, extract_urls,
-        fallback_frame_timestamps, normalize_markdown, should_autodetect_urls,
+        fallback_frame_timestamps, normalize_markdown, orientation_ocr_text_score,
+        should_autodetect_urls,
     };
     use std::path::Path;
 
@@ -1168,5 +1408,28 @@ mod tests {
         assert!(should_autodetect_urls(Path::new("recording.url")));
         assert!(!should_autodetect_urls(Path::new("notes.md")));
         assert!(!should_autodetect_urls(Path::new("script.ts")));
+    }
+
+    #[test]
+    fn orientation_ocr_score_prefers_readable_text_over_noise() {
+        let readable = "TO WHOM IT MAY CONCERN\nThis is to certify that the student resides here.";
+        let noisy = "— | / \\\\ ~~~\n. . . __";
+        assert!(orientation_ocr_text_score(readable) > orientation_ocr_text_score(noisy) + 20.0);
+    }
+
+    #[test]
+    fn orientation_ocr_score_uses_tesseract_tsv_confidence() {
+        let low_confidence = "\
+level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+5\t1\t1\t1\t1\t1\t0\t0\t10\t10\t12.0\tBuoy\n\
+5\t1\t1\t1\t1\t2\t0\t0\t10\t10\t18.0\tAayor\n";
+        let high_confidence = "\
+level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+5\t1\t1\t1\t1\t1\t0\t0\t10\t10\t91.0\tCONFIDENTIAL\n\
+5\t1\t1\t1\t1\t2\t0\t0\t10\t10\t88.0\tSeptember\n";
+        assert!(
+            orientation_ocr_text_score(high_confidence)
+                > orientation_ocr_text_score(low_confidence) + 20.0
+        );
     }
 }

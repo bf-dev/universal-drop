@@ -48,6 +48,8 @@ RUN apt-get update \
       poppler-utils \
       python3 \
       python3-pip \
+      tesseract-ocr \
+      tesseract-ocr-eng \
     && python3 -m pip install --no-cache-dir --break-system-packages --upgrade yt-dlp \
     && rm -rf /var/lib/apt/lists/*
 
@@ -75,6 +77,11 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     PDF_RENDER_DPI=150 \
     PDF_AUTO_ORIENT=true \
     PDF_AUTO_ORIENT_CLI=pdf-page-auto-orient \
+    PDF_ORIENT_OCR_CONFIRM=true \
+    PDF_ORIENT_OCR_CLI=tesseract \
+    PDF_ORIENT_OCR_LANG=eng \
+    PDF_ORIENT_OCR_MIN_CONFIDENCE=0.60 \
+    PDF_ORIENT_OCR_MIN_SCORE=20 \
     URL_MAX_PER_TEXT=8 \
     YT_DLP_CLI=yt-dlp \
     HEADLESS_BROWSER_CLI=chromium \

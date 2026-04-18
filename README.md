@@ -23,7 +23,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 | `.txt`, `.text`, `.url`, `.urls` | Normalize to Markdown text and auto-detect HTTP(S) URLs for URL conversion. |
 | `.md`, code/config text files | Normalize to Markdown text without URL expansion. |
 | `.csv`, `.tsv` | Convert to a Markdown table, capped by `MAX_CSV_ROWS`. |
-| `.pdf` | Render every page with Poppler, auto-orient whole upside-down/sideways page renders with native OpenCV when necessary, and OCR each page with Ollama `glm-ocr`; default render DPI is tuned lower for CPU OCR speed. |
+| `.pdf` | Render every page with Poppler, auto-orient whole upside-down/sideways page renders with native OpenCV, confirm proposed rotations with local Tesseract OCR scoring, and OCR each page with Ollama `glm-ocr`; default render DPI is tuned lower for CPU OCR speed. |
 | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, etc. | Normalize with `ffmpeg`, transcribe with `whisper.cpp`, then write a transcript Markdown file. |
 | `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, etc. | Extract audio for Whisper large-v3, use FFmpeg scene-change detection plus sparse fallback samples, compare selected frames through local Ollama, and write a bounded Markdown summary. |
 | `.doc`, `.docx`, `.odt`, `.pptx`, `.xlsx`, etc. | Try Pandoc first, then headless LibreOffice text conversion. |
@@ -140,6 +140,11 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `PDF_RENDER_DPI` | `150` | PDF page render DPI before OCR; higher values may improve tiny text but slow CPU OCR. |
 | `PDF_AUTO_ORIENT` | `true` | Run native OpenCV page-orientation detection before PDF OCR. Only 90/180/270-degree whole-page rotations are applied; small skew angles under the page-rotation threshold are not changed. |
 | `PDF_AUTO_ORIENT_CLI` | `pdf-page-auto-orient` | OpenCV helper executable used for PDF page orientation detection and safe rotation. |
+| `PDF_ORIENT_OCR_CONFIRM` | `true` | Confirm every proposed PDF page rotation with local Tesseract TSV confidence scoring before replacing the rendered original page. This does not use Ollama. |
+| `PDF_ORIENT_OCR_CLI` | `tesseract` | OCR executable used only for recognition-driven page-orientation confirmation. |
+| `PDF_ORIENT_OCR_LANG` | `eng` | Tesseract language list for orientation confirmation. |
+| `PDF_ORIENT_OCR_MIN_CONFIDENCE` | `0.60` | Minimum relative OCR-score improvement required before applying a proposed page rotation. |
+| `PDF_ORIENT_OCR_MIN_SCORE` | `20` | Minimum candidate OCR score required before applying a proposed page rotation. |
 | `URL_MAX_PER_TEXT` | `8` | Maximum detected URLs expanded from one `.txt`/text drop. Additional URLs are skipped to avoid runaway jobs. |
 | `YT_DLP_CLI` | `yt-dlp` | Executable used to download YouTube and other yt-dlp-supported media/recording pages before running the video/audio conversion flow. |
 | `HEADLESS_BROWSER_CLI` | `chromium` | Headless browser executable used for webpage capture. The converter also falls back to common Chromium/Chrome binary names. |

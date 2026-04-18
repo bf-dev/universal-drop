@@ -26,6 +26,11 @@ pub struct Config {
     pub pdf_render_dpi: usize,
     pub pdf_auto_orient: bool,
     pub pdf_auto_orient_cli: String,
+    pub pdf_orient_ocr_confirm: bool,
+    pub pdf_orient_ocr_cli: String,
+    pub pdf_orient_ocr_lang: String,
+    pub pdf_orient_ocr_min_confidence: f32,
+    pub pdf_orient_ocr_min_score: f32,
     pub url_max_per_text: usize,
     pub yt_dlp_cli: String,
     pub headless_browser_cli: String,
@@ -60,6 +65,15 @@ impl Config {
             bail!("VIDEO_SCENE_THRESHOLD must be between 0.0 and 1.0");
         }
 
+        let pdf_orient_ocr_min_confidence = parse_env_f32("PDF_ORIENT_OCR_MIN_CONFIDENCE", 0.60)?;
+        if !(0.0..=1.0).contains(&pdf_orient_ocr_min_confidence) {
+            bail!("PDF_ORIENT_OCR_MIN_CONFIDENCE must be between 0.0 and 1.0");
+        }
+        let pdf_orient_ocr_min_score = parse_env_f32("PDF_ORIENT_OCR_MIN_SCORE", 20.0)?;
+        if pdf_orient_ocr_min_score < 0.0 {
+            bail!("PDF_ORIENT_OCR_MIN_SCORE must be zero or greater");
+        }
+
         Ok(Self {
             input_dir: env_path("INPUT_DIR", "/data/input"),
             results_dir: env_path("RESULTS_DIR", "/data/results"),
@@ -81,6 +95,13 @@ impl Config {
             pdf_auto_orient: parse_env_bool("PDF_AUTO_ORIENT", true)?,
             pdf_auto_orient_cli: env::var("PDF_AUTO_ORIENT_CLI")
                 .unwrap_or_else(|_| "pdf-page-auto-orient".to_string()),
+            pdf_orient_ocr_confirm: parse_env_bool("PDF_ORIENT_OCR_CONFIRM", true)?,
+            pdf_orient_ocr_cli: env::var("PDF_ORIENT_OCR_CLI")
+                .unwrap_or_else(|_| "tesseract".to_string()),
+            pdf_orient_ocr_lang: env::var("PDF_ORIENT_OCR_LANG")
+                .unwrap_or_else(|_| "eng".to_string()),
+            pdf_orient_ocr_min_confidence,
+            pdf_orient_ocr_min_score,
             url_max_per_text: parse_env_usize("URL_MAX_PER_TEXT", 8)?,
             yt_dlp_cli: env::var("YT_DLP_CLI").unwrap_or_else(|_| "yt-dlp".to_string()),
             headless_browser_cli: env::var("HEADLESS_BROWSER_CLI")
@@ -188,6 +209,11 @@ mod tests {
             pdf_render_dpi: 150,
             pdf_auto_orient: true,
             pdf_auto_orient_cli: "pdf-page-auto-orient".to_string(),
+            pdf_orient_ocr_confirm: true,
+            pdf_orient_ocr_cli: "tesseract".to_string(),
+            pdf_orient_ocr_lang: "eng".to_string(),
+            pdf_orient_ocr_min_confidence: 0.60,
+            pdf_orient_ocr_min_score: 20.0,
             url_max_per_text: 8,
             yt_dlp_cli: "yt-dlp".to_string(),
             headless_browser_cli: "chromium".to_string(),
