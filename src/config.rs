@@ -15,8 +15,15 @@ pub struct Config {
     pub ollama_base_url: String,
     pub ollama_model: String,
     pub ollama_keep_alive: String,
+    pub ollama_num_thread: usize,
     pub whisper_model_path: PathBuf,
     pub whisper_cli: String,
+    pub whisper_threads: usize,
+    pub whisper_processors: usize,
+    pub whisper_beam_size: usize,
+    pub whisper_best_of: usize,
+    pub whisper_no_fallback: bool,
+    pub pdf_render_dpi: usize,
     pub video_min_frames: usize,
     pub video_max_frames: usize,
     pub video_scene_threshold: f32,
@@ -55,9 +62,16 @@ impl Config {
             ollama_base_url: env::var("OLLAMA_BASE_URL")
                 .unwrap_or_else(|_| "http://ollama:11434".to_string()),
             ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "glm-ocr".to_string()),
-            ollama_keep_alive: env::var("OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "5m".to_string()),
+            ollama_keep_alive: env::var("OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "30m".to_string()),
+            ollama_num_thread: parse_env_usize("OLLAMA_NUM_THREAD", 8)?,
             whisper_model_path: env_path("WHISPER_MODEL_PATH", "/models/whisper/ggml-large-v3.bin"),
             whisper_cli: env::var("WHISPER_CLI").unwrap_or_else(|_| "whisper-cli".to_string()),
+            whisper_threads: parse_env_usize("WHISPER_THREADS", 8)?,
+            whisper_processors: parse_env_usize("WHISPER_PROCESSORS", 1)?,
+            whisper_beam_size: parse_env_usize("WHISPER_BEAM_SIZE", 1)?,
+            whisper_best_of: parse_env_usize("WHISPER_BEST_OF", 1)?,
+            whisper_no_fallback: parse_env_bool("WHISPER_NO_FALLBACK", true)?,
+            pdf_render_dpi: parse_env_usize("PDF_RENDER_DPI", 150)?,
             video_min_frames,
             video_max_frames,
             video_scene_threshold,
@@ -121,6 +135,17 @@ fn parse_env_f32(key: &str, default: f32) -> Result<f32> {
     }
 }
 
+fn parse_env_bool(key: &str, default: bool) -> Result<bool> {
+    match env::var(key) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => bail!("{key} must be a boolean such as true/false or 1/0"),
+        },
+        Err(_) => Ok(default),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
@@ -134,9 +159,16 @@ mod tests {
             bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "glm-ocr".to_string(),
-            ollama_keep_alive: "5m".to_string(),
+            ollama_keep_alive: "30m".to_string(),
+            ollama_num_thread: 8,
             whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
+            whisper_threads: 8,
+            whisper_processors: 1,
+            whisper_beam_size: 1,
+            whisper_best_of: 1,
+            whisper_no_fallback: true,
+            pdf_render_dpi: 150,
             video_min_frames: 3,
             video_max_frames: 24,
             video_scene_threshold: 0.35,

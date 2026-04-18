@@ -151,7 +151,9 @@ The service watches the input directory, converts the file, writes Markdown to `
 ## Conversion notes
 
 - PDFs are always rendered page-by-page and OCRed with Ollama `glm-ocr`.
-- Audio files are normalized with `ffmpeg` and transcribed by launching `whisper.cpp` only for that job.
+- PDF pages render at `PDF_RENDER_DPI` before OCR; the default is `150` for faster CPU OCR on this M1/Asahi host.
+- Ollama OCR/frame-analysis requests include `keep_alive` and `num_thread` settings from `OLLAMA_KEEP_ALIVE` and `OLLAMA_NUM_THREAD`.
+- Audio files are normalized with `ffmpeg` and transcribed by launching `whisper.cpp` only for that job. Whisper defaults are tuned for speed: 8 threads, beam size 1, best-of 1, and no fallback retries.
 - Video files are converted locally by extracting audio for Whisper large-v3 and selecting a bounded set of significant visual frames with FFmpeg scene-change detection. The service analyzes the first selected frame and compares later selected frames to the previous selected frame through local Ollama, instead of describing every frame.
 - Video frame controls are `VIDEO_MIN_FRAMES`, `VIDEO_MAX_FRAMES`, and `VIDEO_SCENE_THRESHOLD`.
 - CSV/TSV output is capped by `MAX_CSV_ROWS`.

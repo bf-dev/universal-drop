@@ -10,9 +10,16 @@ services:
       ARCHIVE_DIR: /data/archive
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: glm-ocr
-      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_NUM_THREAD: 8
       WHISPER_CLI: whisper-cli
       WHISPER_MODEL_PATH: /models/whisper/ggml-large-v3.bin
+      WHISPER_THREADS: 8
+      WHISPER_PROCESSORS: 1
+      WHISPER_BEAM_SIZE: 1
+      WHISPER_BEST_OF: 1
+      WHISPER_NO_FALLBACK: "true"
+      PDF_RENDER_DPI: 150
       VIDEO_MIN_FRAMES: 3
       VIDEO_MAX_FRAMES: 24
       VIDEO_SCENE_THRESHOLD: 0.35
@@ -31,7 +38,15 @@ services:
     ports:
       - "11434:11434"
     environment:
-      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_NUM_PARALLEL: 1
+      OLLAMA_FLASH_ATTENTION: 1
+      OLLAMA_VULKAN: 1
+      GGML_VK_VISIBLE_DEVICES: 0
+    devices:
+      - /dev/dri:/dev/dri
+    security_opt:
+      - label=disable
     volumes:
       - ollama-data:/root/.ollama
     restart: unless-stopped

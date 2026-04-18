@@ -6,7 +6,7 @@ RUN cargo build --locked --release
 
 FROM debian:bookworm-slim AS whisper-builder
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates cmake g++ git make pkg-config \
+    && apt-get install -y --no-install-recommends ca-certificates cmake g++ git libopenblas-dev make pkg-config \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git /whisper.cpp
 WORKDIR /whisper.cpp
@@ -14,7 +14,9 @@ RUN cmake -B build \
       -DWHISPER_BUILD_TESTS=OFF \
       -DWHISPER_BUILD_EXAMPLES=ON \
       -DBUILD_SHARED_LIBS=OFF \
-      -DGGML_NATIVE=OFF \
+      -DGGML_NATIVE=ON \
+      -DGGML_BLAS=1 \
+      -DGGML_BLAS_VENDOR=OpenBLAS \
     && cmake --build build --config Release -j"$(nproc)" \
     && mkdir -p /out \
     && install -m 0755 "$(find build -type f -name whisper-cli | head -n 1)" /out/whisper-cli
@@ -24,6 +26,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
       ffmpeg \
+      libopenblas0-pthread \
       libreoffice \
       pandoc \
       poppler-utils \
@@ -40,9 +43,16 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     ARCHIVE_DIR=/data/archive \
     OLLAMA_BASE_URL=http://ollama:11434 \
     OLLAMA_MODEL=glm-ocr \
-    OLLAMA_KEEP_ALIVE=5m \
+    OLLAMA_KEEP_ALIVE=30m \
+    OLLAMA_NUM_THREAD=8 \
     WHISPER_CLI=whisper-cli \
     WHISPER_MODEL_PATH=/models/whisper/ggml-large-v3.bin \
+    WHISPER_THREADS=8 \
+    WHISPER_PROCESSORS=1 \
+    WHISPER_BEAM_SIZE=1 \
+    WHISPER_BEST_OF=1 \
+    WHISPER_NO_FALLBACK=true \
+    PDF_RENDER_DPI=150 \
     VIDEO_MIN_FRAMES=3 \
     VIDEO_MAX_FRAMES=24 \
     VIDEO_SCENE_THRESHOLD=0.35 \

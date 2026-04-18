@@ -173,7 +173,7 @@ fn escape_table_cell(value: &str) -> String {
 
 async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Result<String> {
     let workdir = tempdir().context("failed to create temporary PDF render directory")?;
-    let pages = render_pdf_pages(path, workdir.path()).await?;
+    let pages = render_pdf_pages(path, workdir.path(), config.pdf_render_dpi).await?;
     if pages.is_empty() {
         bail!("pdftoppm produced no images for {}", path.display());
     }
@@ -194,12 +194,12 @@ async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Resul
     Ok(output)
 }
 
-async fn render_pdf_pages(path: &Path, output_dir: &Path) -> Result<Vec<PathBuf>> {
+async fn render_pdf_pages(path: &Path, output_dir: &Path, dpi: usize) -> Result<Vec<PathBuf>> {
     let prefix = output_dir.join("page");
     let output = Command::new("pdftoppm")
         .arg("-jpeg")
         .arg("-r")
-        .arg("200")
+        .arg(dpi.to_string())
         .arg(path)
         .arg(&prefix)
         .stdout(Stdio::piped())
@@ -235,6 +235,13 @@ struct OllamaGenerateRequest<'a> {
     images: Vec<String>,
     stream: bool,
     keep_alive: &'a str,
+    options: OllamaGenerateOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaGenerateOptions {
+    num_thread: usize,
+    temperature: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +273,10 @@ async fn generate_with_ollama_images(
         images,
         stream: false,
         keep_alive: &config.ollama_keep_alive,
+        options: OllamaGenerateOptions {
+            num_thread: config.ollama_num_thread,
+            temperature: 0.0,
+        },
     };
     let url = format!(
         "{}/api/generate",
@@ -303,9 +314,13 @@ async fn transcribe_audio_source(path: &Path, config: &Config) -> Result<String>
     let workdir = tempdir().context("failed to create temporary audio directory")?;
     let wav_path = workdir.path().join("audio.wav");
     let ffmpeg_args = vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-loglevel"),
+        OsString::from("error"),
         OsString::from("-y"),
         OsString::from("-i"),
         path.as_os_str().to_os_string(),
+        OsString::from("-vn"),
         OsString::from("-ar"),
         OsString::from("16000"),
         OsString::from("-ac"),
@@ -320,12 +335,27 @@ async fn transcribe_audio_source(path: &Path, config: &Config) -> Result<String>
     let whisper_args = vec![
         OsString::from("-m"),
         config.whisper_model_path.as_os_str().to_os_string(),
+        OsString::from("-t"),
+        OsString::from(config.whisper_threads.to_string()),
+        OsString::from("-p"),
+        OsString::from(config.whisper_processors.to_string()),
+        OsString::from("-bs"),
+        OsString::from(config.whisper_beam_size.to_string()),
+        OsString::from("-bo"),
+        OsString::from(config.whisper_best_of.to_string()),
         OsString::from("-f"),
         wav_path.as_os_str().to_os_string(),
         OsString::from("-otxt"),
         OsString::from("-of"),
         output_prefix.as_os_str().to_os_string(),
     ];
+    let whisper_args = if config.whisper_no_fallback {
+        let mut args = whisper_args;
+        args.push(OsString::from("-nf"));
+        args
+    } else {
+        whisper_args
+    };
     run_command(&config.whisper_cli, &whisper_args)
         .await
         .with_context(|| format!("failed to run {} for transcription", config.whisper_cli))?;
