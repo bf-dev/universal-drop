@@ -11,6 +11,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 - Leaves failed inputs in place and exposes the error through `/jobs/{id}`.
 - OCRs every PDF page through Ollama using `glm-ocr` with `keep_alive: "5m"`.
 - Runs `whisper.cpp` only as a subprocess during audio transcription jobs.
+- Converts videos into Markdown by transcribing audio with Whisper large-v3 and analyzing only selected significant visual frames with local Ollama.
 
 ## Supported inputs
 
@@ -20,6 +21,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 | `.csv`, `.tsv` | Convert to a Markdown table, capped by `MAX_CSV_ROWS`. |
 | `.pdf` | Render every page with Poppler and OCR each page with Ollama `glm-ocr`. |
 | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, etc. | Normalize with `ffmpeg`, transcribe with `whisper.cpp`, then write a transcript Markdown file. |
+| `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, etc. | Extract audio for Whisper large-v3, use FFmpeg scene-change detection plus sparse fallback samples, compare selected frames through local Ollama, and write a bounded Markdown summary. |
 | `.doc`, `.docx`, `.odt`, `.pptx`, `.xlsx`, etc. | Try Pandoc first, then headless LibreOffice text conversion. |
 | Unknown binary files | Mark the job failed with an unsupported-type error. |
 
@@ -104,6 +106,9 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `OLLAMA_KEEP_ALIVE` | `5m` | Sent in PDF OCR requests and mirrored in compose for Ollama. |
 | `WHISPER_CLI` | `whisper-cli` | whisper.cpp CLI executable. |
 | `WHISPER_MODEL_PATH` | `/models/whisper/ggml-large-v3.bin` | Mounted Whisper model path. |
+| `VIDEO_MIN_FRAMES` | `3` | Minimum selected visual frames for video analysis; fallback samples are added when scene detection finds too few. |
+| `VIDEO_MAX_FRAMES` | `24` | Hard cap on selected visual frames to prevent oversized output and overload. |
+| `VIDEO_SCENE_THRESHOLD` | `0.35` | FFmpeg scene-change threshold from `0.0` to `1.0`; lower values select more frames. |
 | `MAX_CSV_ROWS` | `1000` | CSV/TSV Markdown row cap. |
 | `FILE_STABILITY_CHECKS` | `3` | Number of stable metadata checks before processing a dropped file. |
 | `FILE_STABILITY_DELAY_MS` | `500` | Delay between file-stability checks. |
@@ -129,5 +134,6 @@ cargo run
 ## Notes
 
 - PDF conversion always uses OCR; there is intentionally no text-first fallback in the MVP.
+- Video conversion does not analyze every frame. It uses FFmpeg scene detection with a configured min/max frame budget, then asks local Ollama to describe the first key frame and compare each selected frame to the previous selected frame.
 - The job store is in-memory for this MVP. Restarting the service clears job metadata, but existing input files are scanned again on startup.
 - Uploads are written to hidden `.uploading` files first, then atomically renamed so the watcher does not process partial uploads.

@@ -9,6 +9,7 @@ Build a greenfield Rust + Docker project that converts dropped/uploaded files in
 - Processing is single-job-at-a-time to conserve memory.
 - PDFs are always OCR-read page-by-page with Ollama `glm-ocr`.
 - Audio is transcribed by invoking `whisper.cpp` only during audio jobs, so Whisper models are not resident when idle.
+- Videos are converted locally by transcribing their audio and analyzing only a bounded set of significant visual frames.
 - Originals are moved to an archive folder after successful conversion.
 
 ## Key Implementation Changes
@@ -53,6 +54,12 @@ Build a greenfield Rust + Docker project that converts dropped/uploaded files in
   - Invoke `whisper.cpp` CLI as a subprocess per audio job.
   - Configure model path through `WHISPER_MODEL_PATH`, defaulting to a mounted multilingual large-v3 model path.
   - Do not run Whisper as a long-lived server.
+- Video handling:
+  - Detect common video containers (`mp4`, `mov`, `mkv`, `webm`, `avi`, etc.).
+  - Extract and transcribe audio with the same Whisper large-v3 path.
+  - Use FFmpeg scene-change detection with `VIDEO_SCENE_THRESHOLD` to select significant visual frames.
+  - Enforce `VIDEO_MIN_FRAMES` and `VIDEO_MAX_FRAMES` so the service adds sparse fallback samples when too few changes are found, but never compares every frame or creates unbounded Markdown.
+  - Analyze the first selected frame and compare each later selected frame to the previous selected frame through local Ollama.
 - Document handling:
   - Plain text/Markdown: copy/normalize to Markdown.
   - CSV/TSV: convert to Markdown table, with row-count safeguards for very large files.
@@ -81,6 +88,7 @@ Build a greenfield Rust + Docker project that converts dropped/uploaded files in
 ## Assumptions and Defaults
 - Default result artifact is only the user-facing Markdown file; job metadata is internal.
 - Default Whisper model is multilingual `large-v3`, configurable by environment variable.
+- Default video frame budget is 3 to 24 selected frames with a 0.35 scene threshold.
 - PDF OCR is always used, not text-first fallback.
 - Concurrency is one conversion job at a time.
 - Ollama unload policy follows Ollama's documented default/`keep_alive` behavior: models are kept in memory for 5 minutes unless configured otherwise. Source: https://github.com/ollama/ollama/blob/main/docs/faq.mdx

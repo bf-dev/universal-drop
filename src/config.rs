@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     env,
     net::SocketAddr,
@@ -17,6 +17,9 @@ pub struct Config {
     pub ollama_keep_alive: String,
     pub whisper_model_path: PathBuf,
     pub whisper_cli: String,
+    pub video_min_frames: usize,
+    pub video_max_frames: usize,
+    pub video_scene_threshold: f32,
     pub max_csv_rows: usize,
     pub file_stability_checks: usize,
     pub file_stability_delay: Duration,
@@ -28,6 +31,21 @@ impl Config {
             .unwrap_or_else(|_| "0.0.0.0:8080".to_string())
             .parse::<SocketAddr>()
             .context("BIND_ADDR must be a socket address such as 0.0.0.0:8080")?;
+        let video_min_frames = parse_env_usize("VIDEO_MIN_FRAMES", 3)?;
+        let video_max_frames = parse_env_usize("VIDEO_MAX_FRAMES", 24)?;
+        if video_min_frames == 0 {
+            bail!("VIDEO_MIN_FRAMES must be at least 1");
+        }
+        if video_max_frames == 0 {
+            bail!("VIDEO_MAX_FRAMES must be at least 1");
+        }
+        if video_max_frames < video_min_frames {
+            bail!("VIDEO_MAX_FRAMES must be greater than or equal to VIDEO_MIN_FRAMES");
+        }
+        let video_scene_threshold = parse_env_f32("VIDEO_SCENE_THRESHOLD", 0.35)?;
+        if !(0.0..=1.0).contains(&video_scene_threshold) {
+            bail!("VIDEO_SCENE_THRESHOLD must be between 0.0 and 1.0");
+        }
 
         Ok(Self {
             input_dir: env_path("INPUT_DIR", "/data/input"),
@@ -40,6 +58,9 @@ impl Config {
             ollama_keep_alive: env::var("OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "5m".to_string()),
             whisper_model_path: env_path("WHISPER_MODEL_PATH", "/models/whisper/ggml-large-v3.bin"),
             whisper_cli: env::var("WHISPER_CLI").unwrap_or_else(|_| "whisper-cli".to_string()),
+            video_min_frames,
+            video_max_frames,
+            video_scene_threshold,
             max_csv_rows: parse_env_usize("MAX_CSV_ROWS", 1_000)?,
             file_stability_checks: parse_env_usize("FILE_STABILITY_CHECKS", 3)?,
             file_stability_delay: Duration::from_millis(parse_env_usize(
@@ -91,6 +112,15 @@ fn parse_env_usize(key: &str, default: usize) -> Result<usize> {
     }
 }
 
+fn parse_env_f32(key: &str, default: f32) -> Result<f32> {
+    match env::var(key) {
+        Ok(value) => value
+            .parse::<f32>()
+            .with_context(|| format!("{key} must be a decimal number")),
+        Err(_) => Ok(default),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
@@ -107,6 +137,9 @@ mod tests {
             ollama_keep_alive: "5m".to_string(),
             whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
+            video_min_frames: 3,
+            video_max_frames: 24,
+            video_scene_threshold: 0.35,
             max_csv_rows: 1_000,
             file_stability_checks: 1,
             file_stability_delay: Duration::from_millis(1),

@@ -43,6 +43,9 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     OLLAMA_KEEP_ALIVE=5m \
     WHISPER_CLI=whisper-cli \
     WHISPER_MODEL_PATH=/models/whisper/ggml-large-v3.bin \
+    VIDEO_MIN_FRAMES=3 \
+    VIDEO_MAX_FRAMES=24 \
+    VIDEO_SCENE_THRESHOLD=0.35 \
     RUST_LOG=info
 
 EXPOSE 8080

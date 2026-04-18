@@ -19,6 +19,7 @@ pub enum ConversionRoute {
     Csv(u8),
     Pdf,
     Audio,
+    Video,
     Office,
     Unsupported,
 }
@@ -32,6 +33,7 @@ pub async fn convert_to_markdown(path: &Path, config: &Config, client: &Client) 
         }
         ConversionRoute::Pdf => pdf_to_markdown(path, config, client).await?,
         ConversionRoute::Audio => audio_to_markdown(path, config).await?,
+        ConversionRoute::Video => video_to_markdown(path, config, client).await?,
         ConversionRoute::Office => office_to_markdown(path).await?,
         ConversionRoute::Unsupported => bail!("unsupported file type for {}", path.display()),
     };
@@ -59,6 +61,9 @@ pub fn detect_route(path: &Path) -> ConversionRoute {
         Some("mp3" | "wav" | "m4a" | "flac" | "ogg" | "opus" | "aac" | "wma" | "aiff" | "aif") => {
             return ConversionRoute::Audio;
         }
+        Some("mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" | "mpg" | "mpeg" | "3gp" | "flv") => {
+            return ConversionRoute::Video;
+        }
         Some("doc" | "docx" | "odt" | "rtf" | "ppt" | "pptx" | "odp" | "xls" | "xlsx" | "ods") => {
             return ConversionRoute::Office;
         }
@@ -73,6 +78,7 @@ pub fn detect_route(path: &Path) -> ConversionRoute {
         Some(("text", _)) => ConversionRoute::PlainText,
         Some(("application", "pdf")) => ConversionRoute::Pdf,
         Some(("audio", _)) => ConversionRoute::Audio,
+        Some(("video", _)) => ConversionRoute::Video,
         _ => ConversionRoute::Unsupported,
     }
 }
@@ -237,15 +243,27 @@ struct OllamaGenerateResponse {
 }
 
 async fn ocr_page_with_ollama(path: &Path, config: &Config, client: &Client) -> Result<String> {
-    let bytes = fs::read(path)
-        .await
-        .with_context(|| format!("failed to read rendered page {}", path.display()))?;
-    let image = BASE64.encode(bytes);
     let prompt = "Read this document page using OCR. Return faithful Markdown only. Preserve tables, headings, lists, reading order, and visible text. Do not add commentary.";
+    generate_with_ollama_images(&[path], prompt, config, client).await
+}
+
+async fn generate_with_ollama_images(
+    paths: &[&Path],
+    prompt: &str,
+    config: &Config,
+    client: &Client,
+) -> Result<String> {
+    let mut images = Vec::with_capacity(paths.len());
+    for path in paths {
+        let bytes = fs::read(path)
+            .await
+            .with_context(|| format!("failed to read image {}", path.display()))?;
+        images.push(BASE64.encode(bytes));
+    }
     let request = OllamaGenerateRequest {
         model: &config.ollama_model,
         prompt,
-        images: vec![image],
+        images,
         stream: false,
         keep_alive: &config.ollama_keep_alive,
     };
@@ -273,6 +291,15 @@ async fn ocr_page_with_ollama(path: &Path, config: &Config, client: &Client) -> 
 }
 
 async fn audio_to_markdown(path: &Path, config: &Config) -> Result<String> {
+    let transcript = transcribe_audio_source(path, config).await?;
+    let title = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "audio".into());
+    Ok(format!("# Transcript: {title}\n\n{}\n", transcript.trim()))
+}
+
+async fn transcribe_audio_source(path: &Path, config: &Config) -> Result<String> {
     let workdir = tempdir().context("failed to create temporary audio directory")?;
     let wav_path = workdir.path().join("audio.wav");
     let ffmpeg_args = vec![
@@ -307,11 +334,248 @@ async fn audio_to_markdown(path: &Path, config: &Config) -> Result<String> {
     let transcript = fs::read_to_string(&transcript_path)
         .await
         .with_context(|| format!("failed to read transcript {}", transcript_path.display()))?;
+    Ok(transcript.trim().to_string())
+}
+
+#[derive(Debug)]
+struct VideoFrame {
+    path: PathBuf,
+    label: String,
+}
+
+async fn video_to_markdown(path: &Path, config: &Config, client: &Client) -> Result<String> {
     let title = path
         .file_name()
         .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| "audio".into());
-    Ok(format!("# Transcript: {title}\n\n{}\n", transcript.trim()))
+        .unwrap_or_else(|| "video".into());
+    let workdir = tempdir().context("failed to create temporary video frame directory")?;
+    let frames = select_video_frames(path, workdir.path(), config).await?;
+    if frames.is_empty() {
+        bail!("ffmpeg produced no video frames for {}", path.display());
+    }
+
+    let transcript = transcribe_audio_source(path, config).await;
+    let mut output = format!("# Video analysis: {title}\n\n");
+    output.push_str("## Selection strategy\n\n");
+    output.push_str(&format!(
+        "- Visual frames analyzed: {}\n- Scene-change threshold: `{:.2}`\n- Minimum frames: `{}`\n- Maximum frames: `{}`\n\n",
+        frames.len(),
+        config.video_scene_threshold,
+        config.video_min_frames,
+        config.video_max_frames
+    ));
+    output.push_str("_Frames are selected from significant visual changes plus sparse fallback samples. The service does not OCR or describe every frame, which keeps output and memory use bounded._\n\n");
+
+    output.push_str("## Audio transcript\n\n");
+    match transcript {
+        Ok(text) if !text.trim().is_empty() => {
+            output.push_str(text.trim());
+            output.push_str("\n\n");
+        }
+        Ok(_) => output.push_str("_Whisper large-v3 produced an empty transcript._\n\n"),
+        Err(error) => output.push_str(&format!(
+            "_No usable audio transcript was produced: {error:#}_\n\n"
+        )),
+    }
+
+    output.push_str("## Visual key frames\n\n");
+    for (index, frame) in frames.iter().enumerate() {
+        let previous = index
+            .checked_sub(1)
+            .and_then(|previous_index| frames.get(previous_index));
+        let analysis = analyze_video_frame(frame, previous, index, frames.len(), config, client)
+            .await
+            .with_context(|| format!("Ollama frame analysis failed for frame {}", index + 1))?;
+        output.push_str(&format!("### Frame {} — {}\n\n", index + 1, frame.label));
+        output.push_str(analysis.trim());
+        output.push_str("\n\n");
+    }
+
+    Ok(output)
+}
+
+async fn select_video_frames(
+    path: &Path,
+    output_dir: &Path,
+    config: &Config,
+) -> Result<Vec<VideoFrame>> {
+    let duration = probe_video_duration(path).await.unwrap_or(None);
+    let mut frames = extract_scene_change_frames(path, output_dir, config).await?;
+
+    if frames.len() < config.video_min_frames && frames.len() < config.video_max_frames {
+        let needed =
+            (config.video_min_frames - frames.len()).min(config.video_max_frames - frames.len());
+        for (index, timestamp) in fallback_frame_timestamps(duration, needed)
+            .into_iter()
+            .enumerate()
+        {
+            let output_path = output_dir.join(format!("fallback-{index:06}.jpg"));
+            extract_frame_at_timestamp(path, timestamp, &output_path).await?;
+            if fs::try_exists(&output_path).await? {
+                frames.push(VideoFrame {
+                    path: output_path,
+                    label: format!("fallback sample at {timestamp:.2}s"),
+                });
+            }
+        }
+    }
+
+    frames.truncate(config.video_max_frames);
+    Ok(frames)
+}
+
+async fn extract_scene_change_frames(
+    path: &Path,
+    output_dir: &Path,
+    config: &Config,
+) -> Result<Vec<VideoFrame>> {
+    let pattern = output_dir.join("scene-%06d.jpg");
+    let filter = format!(
+        "select=eq(n\\,0)+gt(scene\\,{:.3}),scale=1280:-2",
+        config.video_scene_threshold
+    );
+    let args = vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-y"),
+        OsString::from("-i"),
+        path.as_os_str().to_os_string(),
+        OsString::from("-map"),
+        OsString::from("0:v:0"),
+        OsString::from("-an"),
+        OsString::from("-vf"),
+        OsString::from(filter),
+        OsString::from("-fps_mode"),
+        OsString::from("vfr"),
+        OsString::from("-frames:v"),
+        OsString::from(config.video_max_frames.to_string()),
+        OsString::from("-q:v"),
+        OsString::from("3"),
+        pattern.as_os_str().to_os_string(),
+    ];
+    run_command("ffmpeg", &args)
+        .await
+        .context("failed to extract scene-change video frames with ffmpeg")?;
+
+    let paths = collect_jpegs_with_prefix(output_dir, "scene-").await?;
+    Ok(paths
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| VideoFrame {
+            path,
+            label: format!("scene-change key frame {}", index + 1),
+        })
+        .collect())
+}
+
+async fn extract_frame_at_timestamp(path: &Path, timestamp: f64, output_path: &Path) -> Result<()> {
+    let args = vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-y"),
+        OsString::from("-ss"),
+        OsString::from(format!("{timestamp:.3}")),
+        OsString::from("-i"),
+        path.as_os_str().to_os_string(),
+        OsString::from("-map"),
+        OsString::from("0:v:0"),
+        OsString::from("-an"),
+        OsString::from("-frames:v"),
+        OsString::from("1"),
+        OsString::from("-vf"),
+        OsString::from("scale=1280:-2"),
+        OsString::from("-q:v"),
+        OsString::from("3"),
+        output_path.as_os_str().to_os_string(),
+    ];
+    run_command("ffmpeg", &args)
+        .await
+        .with_context(|| format!("failed to extract fallback video frame at {timestamp:.2}s"))
+}
+
+async fn collect_jpegs_with_prefix(dir: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut entries = fs::read_dir(dir)
+        .await
+        .with_context(|| format!("failed to read video frame directory {}", dir.display()))?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let file_name_matches = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.starts_with(prefix))
+            .unwrap_or(false);
+        let is_jpeg = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+            .unwrap_or(false);
+        if file_name_matches && is_jpeg {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+async fn analyze_video_frame(
+    frame: &VideoFrame,
+    previous: Option<&VideoFrame>,
+    index: usize,
+    total: usize,
+    config: &Config,
+    client: &Client,
+) -> Result<String> {
+    let prompt = if previous.is_some() {
+        format!(
+            "You are analyzing selected video key frames locally. Image 1 is the previous selected frame; image 2 is frame {} of {}. Compare them and return concise Markdown bullets focused on meaningful visual changes, newly visible OCR text, UI/document state changes, scene changes, people/objects that changed, and information a reader needs. Avoid repeating unchanged details. If the change is minor, say so briefly. Do not hallucinate invisible details.",
+            index + 1,
+            total
+        )
+    } else {
+        format!(
+            "You are analyzing frame 1 of {} selected video key frames locally. Return concise Markdown bullets with visible OCR text, important objects/people/UI/document state, scene context, and why this first selected frame matters. Do not hallucinate invisible details.",
+            total
+        )
+    };
+    match previous {
+        Some(previous) => {
+            generate_with_ollama_images(&[&previous.path, &frame.path], &prompt, config, client)
+                .await
+        }
+        None => generate_with_ollama_images(&[&frame.path], &prompt, config, client).await,
+    }
+}
+
+async fn probe_video_duration(path: &Path) -> Result<Option<f64>> {
+    let args = vec![
+        OsString::from("-v"),
+        OsString::from("error"),
+        OsString::from("-show_entries"),
+        OsString::from("format=duration"),
+        OsString::from("-of"),
+        OsString::from("default=noprint_wrappers=1:nokey=1"),
+        path.as_os_str().to_os_string(),
+    ];
+    let output = run_command_output("ffprobe", &args).await?;
+    let trimmed = output.trim();
+    if trimmed.is_empty() || trimmed == "N/A" {
+        return Ok(None);
+    }
+    Ok(trimmed.parse::<f64>().ok().filter(|value| *value > 0.0))
+}
+
+fn fallback_frame_timestamps(duration_seconds: Option<f64>, count: usize) -> Vec<f64> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let Some(duration) = duration_seconds.filter(|value| value.is_finite() && *value > 0.0) else {
+        return (0..count).map(|index| index as f64).collect();
+    };
+    (0..count)
+        .map(|index| {
+            let timestamp = (index + 1) as f64 * duration / (count + 1) as f64;
+            timestamp.min((duration - 0.05).max(0.0))
+        })
+        .collect()
 }
 
 async fn office_to_markdown(path: &Path) -> Result<String> {
@@ -380,6 +644,18 @@ async fn run_command(program: &str, args: &[OsString]) -> Result<()> {
     ensure_success(program, args, &output)
 }
 
+async fn run_command_output(program: &str, args: &[OsString]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("failed to execute {program}"))?;
+    ensure_success(program, args, &output)?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 fn ensure_success(program: &str, args: &[OsString], output: &std::process::Output) -> Result<()> {
     if output.status.success() {
         return Ok(());
@@ -401,7 +677,10 @@ fn ensure_success(program: &str, args: &[OsString], output: &std::process::Outpu
 
 #[cfg(test)]
 mod tests {
-    use super::{ConversionRoute, csv_bytes_to_markdown, detect_route, normalize_markdown};
+    use super::{
+        ConversionRoute, csv_bytes_to_markdown, detect_route, fallback_frame_timestamps,
+        normalize_markdown,
+    };
     use std::path::Path;
 
     #[test]
@@ -420,6 +699,10 @@ mod tests {
             ConversionRoute::Csv(b'\t')
         );
         assert_eq!(detect_route(Path::new("voice.mp3")), ConversionRoute::Audio);
+        assert_eq!(
+            detect_route(Path::new("screen.mp4")),
+            ConversionRoute::Video
+        );
         assert_eq!(
             detect_route(Path::new("deck.pptx")),
             ConversionRoute::Office
@@ -448,5 +731,11 @@ mod tests {
     fn csv_conversion_reports_truncation() {
         let markdown = csv_bytes_to_markdown(b"a\n1\n2\n", b',', 1).unwrap();
         assert!(markdown.contains("Only the first 1 data rows"));
+    }
+
+    #[test]
+    fn fallback_timestamps_are_evenly_spaced_inside_duration() {
+        let timestamps = fallback_frame_timestamps(Some(12.0), 3);
+        assert_eq!(timestamps, vec![3.0, 6.0, 9.0]);
     }
 }

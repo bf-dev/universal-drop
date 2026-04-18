@@ -152,5 +152,7 @@ The service watches the input directory, converts the file, writes Markdown to `
 
 - PDFs are always rendered page-by-page and OCRed with Ollama `glm-ocr`.
 - Audio files are normalized with `ffmpeg` and transcribed by launching `whisper.cpp` only for that job.
+- Video files are converted locally by extracting audio for Whisper large-v3 and selecting a bounded set of significant visual frames with FFmpeg scene-change detection. The service analyzes the first selected frame and compares later selected frames to the previous selected frame through local Ollama, instead of describing every frame.
+- Video frame controls are `VIDEO_MIN_FRAMES`, `VIDEO_MAX_FRAMES`, and `VIDEO_SCENE_THRESHOLD`.
 - CSV/TSV output is capped by `MAX_CSV_ROWS`.
 - Failed conversions leave the source file in the input directory and put the failure message in the job's `error` field.
