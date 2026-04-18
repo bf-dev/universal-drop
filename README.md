@@ -24,7 +24,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 | `.md`, code/config text files | Normalize to Markdown text without URL expansion. |
 | `.csv`, `.tsv` | Convert to a Markdown table, capped by `MAX_CSV_ROWS`. |
 | `.pdf` | Render every page with Poppler, auto-orient whole upside-down/sideways page renders with native OpenCV, confirm proposed rotations with local Tesseract OCR scoring, and OCR each page with Ollama `glm-ocr`; default render DPI is tuned lower for CPU OCR speed. |
-| `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, etc. | Normalize with `ffmpeg`, transcribe with `whisper.cpp`, then write a transcript Markdown file. |
+| `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, etc. | Normalize with `ffmpeg`, transcribe with `whisper.cpp`, collapse consecutive duplicate Whisper lines, then write a transcript Markdown file. |
 | `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, etc. | Extract audio for Whisper large-v3, use FFmpeg scene-change detection plus sparse fallback samples, compare selected frames through local Ollama, and write a bounded Markdown summary. |
 | `.doc`, `.docx`, `.odt`, `.pptx`, `.xlsx`, etc. | Try Pandoc first, then headless LibreOffice text conversion. |
 | HTTP(S) URLs submitted through `/text` or a URL text file | Try `yt-dlp` for YouTube and other supported media/recording pages; if no media is downloaded, capture the webpage with headless Chromium into paginated pages and OCR it. |

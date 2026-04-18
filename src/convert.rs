@@ -939,7 +939,94 @@ async fn transcribe_audio_source(path: &Path, config: &Config) -> Result<String>
     let transcript = fs::read_to_string(&transcript_path)
         .await
         .with_context(|| format!("failed to read transcript {}", transcript_path.display()))?;
-    Ok(transcript.trim().to_string())
+    Ok(collapse_consecutive_repeated_transcript_lines(&transcript))
+}
+
+fn collapse_consecutive_repeated_transcript_lines(transcript: &str) -> String {
+    let normalized = transcript.replace("\r\n", "\n").replace('\r', "\n");
+    let mut output = Vec::new();
+    let mut previous_key: Option<String> = None;
+
+    for line in normalized.lines() {
+        let trimmed = line.trim_end();
+        let key = transcript_line_repetition_key(trimmed);
+        if key.is_empty() {
+            output.push(trimmed.to_string());
+            previous_key = None;
+            continue;
+        }
+        if previous_key.as_deref() == Some(key.as_str()) {
+            continue;
+        }
+        output.push(trimmed.to_string());
+        previous_key = Some(key);
+    }
+
+    output.join("\n").trim().to_string()
+}
+
+fn transcript_line_repetition_key(line: &str) -> String {
+    let line = strip_whisper_timestamp_prefix(line.trim());
+    let mut key = String::new();
+    let mut pending_space = false;
+    for ch in line.chars() {
+        if ch.is_alphanumeric()
+            || ('\u{ac00}'..='\u{d7af}').contains(&ch)
+            || ('\u{4e00}'..='\u{9fff}').contains(&ch)
+            || ('\u{3040}'..='\u{30ff}').contains(&ch)
+        {
+            if pending_space && !key.is_empty() {
+                key.push(' ');
+            }
+            for lower in ch.to_lowercase() {
+                key.push(lower);
+            }
+            pending_space = false;
+        } else {
+            pending_space = true;
+        }
+    }
+    key.trim().to_string()
+}
+
+fn strip_whisper_timestamp_prefix(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if let Some(rest) = strip_wrapped_timestamp_prefix(trimmed, '[', ']') {
+        return rest.trim_start();
+    }
+    if let Some(rest) = strip_wrapped_timestamp_prefix(trimmed, '(', ')') {
+        return rest.trim_start();
+    }
+    if let Some(index) = trimmed.find("-->") {
+        if index <= 20 {
+            let after_arrow = trimmed[index + 3..].trim_start();
+            let split_at = after_arrow
+                .char_indices()
+                .find_map(|(offset, ch)| {
+                    if ch.is_whitespace() {
+                        Some(offset + ch.len_utf8())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(after_arrow.len());
+            return after_arrow[split_at..].trim_start();
+        }
+    }
+    trimmed
+}
+
+fn strip_wrapped_timestamp_prefix(line: &str, open: char, close: char) -> Option<&str> {
+    if !line.starts_with(open) {
+        return None;
+    }
+    let close_index = line.find(close)?;
+    let inside = &line[open.len_utf8()..close_index];
+    if inside.contains("-->") || inside.chars().filter(|ch| *ch == ':').count() >= 2 {
+        Some(&line[close_index + close.len_utf8()..])
+    } else {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -1326,9 +1413,9 @@ fn ensure_success(program: &str, args: &[OsString], output: &std::process::Outpu
 #[cfg(test)]
 mod tests {
     use super::{
-        ConversionRoute, csv_bytes_to_markdown, detect_route, extract_urls,
-        fallback_frame_timestamps, normalize_markdown, orientation_ocr_text_score,
-        should_autodetect_urls,
+        ConversionRoute, collapse_consecutive_repeated_transcript_lines, csv_bytes_to_markdown,
+        detect_route, extract_urls, fallback_frame_timestamps, normalize_markdown,
+        orientation_ocr_text_score, should_autodetect_urls,
     };
     use std::path::Path;
 
@@ -1430,6 +1517,53 @@ level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theigh
         assert!(
             orientation_ocr_text_score(high_confidence)
                 > orientation_ocr_text_score(low_confidence) + 20.0
+        );
+    }
+
+    #[test]
+    fn collapses_consecutive_repeated_whisper_lines() {
+        let transcript = "\
+ First line.\n\
+ Repeated line!\n\
+ repeated line\n\
+ repeated—line.\n\
+ Next line.\n";
+        assert_eq!(
+            collapse_consecutive_repeated_transcript_lines(transcript),
+            "First line.\nRepeated line!\nNext line."
+        );
+    }
+
+    #[test]
+    fn collapses_timestamped_repeated_whisper_lines() {
+        let transcript = "\
+[00:00:01.000 --> 00:00:02.000] Same phrase here.\n\
+[00:00:02.000 --> 00:00:03.000] same phrase here\n\
+[00:00:03.000 --> 00:00:04.000] Different phrase.\n";
+        assert_eq!(
+            collapse_consecutive_repeated_transcript_lines(transcript),
+            "[00:00:01.000 --> 00:00:02.000] Same phrase here.\n[00:00:03.000 --> 00:00:04.000] Different phrase."
+        );
+    }
+
+    #[test]
+    fn collapses_bare_timestamped_repeated_whisper_lines() {
+        let transcript = "\
+00:00:01.000 --> 00:00:02.000 Same phrase here.\n\
+00:00:02.000 --> 00:00:03.000 same phrase here\n\
+00:00:03.000 --> 00:00:04.000 Different phrase.\n";
+        assert_eq!(
+            collapse_consecutive_repeated_transcript_lines(transcript),
+            "00:00:01.000 --> 00:00:02.000 Same phrase here.\n00:00:03.000 --> 00:00:04.000 Different phrase."
+        );
+    }
+
+    #[test]
+    fn preserves_non_consecutive_repeated_whisper_lines() {
+        let transcript = "Repeat me.\nInterruption.\nRepeat me.\n";
+        assert_eq!(
+            collapse_consecutive_repeated_transcript_lines(transcript),
+            "Repeat me.\nInterruption.\nRepeat me."
         );
     }
 }
