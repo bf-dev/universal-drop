@@ -18,16 +18,35 @@ constexpr int kMinForegroundPixels = 900;
 constexpr double kUpsideDownScoreThreshold = -0.24;
 constexpr double kSidewaysProjectionRatio = 1.25;
 constexpr double kSidewaysMinDelta = 0.35;
-constexpr double kSidewaysUprightDelta = 0.12;
+constexpr double kSidewaysUprightDelta = 0.55;
+constexpr double kLongRuleMinLengthRatio = 0.55;
+constexpr double kLongRuleMaxThicknessRatio = 0.018;
+constexpr double kArtifactHeavyRemovedRatio = 0.07;
+constexpr double kArtifactHeavyRawToCleanRatio = 2.2;
+constexpr int kMinUpsideDownTextLikeComponents = 80;
 
 struct Analysis {
     int rotation = 0;
     double confidence = 0.0;
+    double raw_foreground_ratio = 0.0;
+    double removed_foreground_ratio = 0.0;
     double foreground_ratio = 0.0;
     double horizontal_score = 0.0;
     double vertical_score = 0.0;
     double upright_score = 0.0;
+    int kept_components = 0;
+    int text_like_components = 0;
+    int long_rule_components = 0;
     std::string reason = "not_needed";
+};
+
+struct MaskResult {
+    cv::Mat mask;
+    double raw_foreground_ratio = 0.0;
+    double removed_foreground_ratio = 0.0;
+    int kept_components = 0;
+    int text_like_components = 0;
+    int long_rule_components = 0;
 };
 
 std::string json_escape(const std::string &value) {
@@ -56,17 +75,51 @@ cv::Mat resize_for_analysis(const cv::Mat &gray) {
     return resized;
 }
 
-cv::Mat foreground_mask(const cv::Mat &gray) {
+bool is_long_rule_component(int width, int height, int cols, int rows) {
+    int max_horizontal_thickness =
+        std::max(3, static_cast<int>(std::round(rows * kLongRuleMaxThicknessRatio)));
+    int max_vertical_thickness =
+        std::max(3, static_cast<int>(std::round(cols * kLongRuleMaxThicknessRatio)));
+
+    bool horizontal_rule =
+        width > cols * kLongRuleMinLengthRatio && height <= max_horizontal_thickness;
+    bool vertical_rule =
+        height > rows * kLongRuleMinLengthRatio && width <= max_vertical_thickness;
+    return horizontal_rule || vertical_rule;
+}
+
+bool is_text_like_component(int area, int width, int height, int total_area, int cols, int rows) {
+    int min_area = std::max(4, total_area / 350000);
+    int max_area = std::max(60, total_area / 900);
+    if (area < min_area || area > max_area) {
+        return false;
+    }
+    if (width < 2 || height < 3) {
+        return false;
+    }
+    if (width > cols * 0.25 || height > rows * 0.12) {
+        return false;
+    }
+    double aspect = static_cast<double>(width) / static_cast<double>(std::max(1, height));
+    return aspect >= 0.05 && aspect <= 18.0;
+}
+
+MaskResult foreground_mask(const cv::Mat &gray) {
     cv::Mat blurred;
     cv::GaussianBlur(gray, blurred, cv::Size(3, 3), 0.0);
 
     cv::Mat mask;
     cv::threshold(blurred, mask, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
 
+    MaskResult result;
+    int total_area = mask.rows * mask.cols;
+    int raw_foreground = cv::countNonZero(mask);
+    result.raw_foreground_ratio =
+        static_cast<double>(raw_foreground) / static_cast<double>(std::max(1, total_area));
+
     cv::Mat labels, stats, centroids;
     int components = cv::connectedComponentsWithStats(mask, labels, stats, centroids, 8, CV_32S);
     cv::Mat cleaned = cv::Mat::zeros(mask.size(), CV_8U);
-    int total_area = mask.rows * mask.cols;
     int min_area = std::max(3, total_area / 250000);
     int max_area = std::max(200, total_area / 5);
 
@@ -84,9 +137,26 @@ cv::Mat foreground_mask(const cv::Mat &gray) {
         if (height > mask.rows * 0.96 && width > mask.cols * 0.03) {
             continue;
         }
+        // Ruled notebook paper, table borders, and pharmacy-slip separators are
+        // strong horizontal/vertical projection signals but not page-orientation
+        // evidence. Keeping them made bottom-heavy handwritten pages look like
+        // upside-down printed documents, so drop long thin rules before scoring.
+        if (is_long_rule_component(width, height, mask.cols, mask.rows)) {
+            result.long_rule_components += 1;
+            continue;
+        }
+        result.kept_components += 1;
+        if (is_text_like_component(area, width, height, total_area, mask.cols, mask.rows)) {
+            result.text_like_components += 1;
+        }
         cleaned.setTo(255, labels == label);
     }
-    return cleaned;
+    result.mask = cleaned;
+    int cleaned_foreground = cv::countNonZero(cleaned);
+    result.removed_foreground_ratio =
+        static_cast<double>(std::max(0, raw_foreground - cleaned_foreground)) /
+        static_cast<double>(std::max(1, total_area));
+    return result;
 }
 
 cv::Mat rotate_quadrant(const cv::Mat &image, int degrees) {
@@ -190,10 +260,16 @@ Analysis analyze_orientation(const cv::Mat &gray) {
     // so scans tilted under the requested 45-50 degree threshold stay untouched.
     Analysis analysis;
     cv::Mat small = resize_for_analysis(gray);
-    cv::Mat mask = foreground_mask(small);
+    MaskResult mask_result = foreground_mask(small);
+    cv::Mat mask = mask_result.mask;
     int foreground = cv::countNonZero(mask);
     int area = mask.rows * mask.cols;
+    analysis.raw_foreground_ratio = mask_result.raw_foreground_ratio;
+    analysis.removed_foreground_ratio = mask_result.removed_foreground_ratio;
     analysis.foreground_ratio = static_cast<double>(foreground) / static_cast<double>(area);
+    analysis.kept_components = mask_result.kept_components;
+    analysis.text_like_components = mask_result.text_like_components;
+    analysis.long_rule_components = mask_result.long_rule_components;
 
     if (foreground < kMinForegroundPixels || analysis.foreground_ratio < kMinForegroundRatio) {
         analysis.reason = "low_foreground_skip";
@@ -225,6 +301,22 @@ Analysis analyze_orientation(const cv::Mat &gray) {
     }
 
     if (analysis.upright_score <= kUpsideDownScoreThreshold) {
+        bool artifact_heavy =
+            analysis.removed_foreground_ratio >= kArtifactHeavyRemovedRatio &&
+            analysis.raw_foreground_ratio >=
+                analysis.foreground_ratio * kArtifactHeavyRawToCleanRatio;
+        if (artifact_heavy) {
+            analysis.confidence = std::min(1.0, -analysis.upright_score);
+            analysis.reason = "artifact_heavy_upside_down_skip";
+            return analysis;
+        }
+
+        if (analysis.text_like_components < kMinUpsideDownTextLikeComponents) {
+            analysis.confidence = std::min(1.0, -analysis.upright_score);
+            analysis.reason = "low_text_evidence_upside_down_skip";
+            return analysis;
+        }
+
         analysis.rotation = 180;
         analysis.confidence = std::min(1.0, -analysis.upright_score);
         analysis.reason = "bottom_heavy_upside_down";
@@ -283,10 +375,15 @@ int main(int argc, char **argv) {
               << "\"output\":\"" << json_escape(output_path) << "\","
               << "\"rotation\":" << analysis.rotation << ","
               << "\"confidence\":" << analysis.confidence << ","
+              << "\"raw_foreground_ratio\":" << analysis.raw_foreground_ratio << ","
+              << "\"removed_foreground_ratio\":" << analysis.removed_foreground_ratio << ","
               << "\"foreground_ratio\":" << analysis.foreground_ratio << ","
               << "\"horizontal_score\":" << analysis.horizontal_score << ","
               << "\"vertical_score\":" << analysis.vertical_score << ","
               << "\"upright_score\":" << analysis.upright_score << ","
+              << "\"kept_components\":" << analysis.kept_components << ","
+              << "\"text_like_components\":" << analysis.text_like_components << ","
+              << "\"long_rule_components\":" << analysis.long_rule_components << ","
               << "\"reason\":\"" << json_escape(analysis.reason) << "\""
               << "}\n";
     return 0;
