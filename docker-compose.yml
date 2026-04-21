@@ -45,7 +45,7 @@ services:
     restart: unless-stopped
 
   ollama:
-    image: ollama/ollama:latest
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     ports:
       - "11434:11434"
     environment:
@@ -53,6 +53,7 @@ services:
       OLLAMA_NUM_PARALLEL: 1
       OLLAMA_FLASH_ATTENTION: 1
       OLLAMA_VULKAN: 1
+      OLLAMA_LLM_LIBRARY: ${OLLAMA_LLM_LIBRARY:-}
       GGML_VK_VISIBLE_DEVICES: 0
     devices:
       - /dev/dri:/dev/dri
