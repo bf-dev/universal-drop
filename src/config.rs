@@ -23,6 +23,7 @@ pub struct Config {
     pub gemini_deployment_id: String,
     pub gemini_thinking_budget: Option<usize>,
     pub gemini_timeout_seconds: usize,
+    pub gemini_min_interval_seconds: usize,
     pub whisper_model_path: PathBuf,
     pub whisper_cli: String,
     pub whisper_threads: usize,
@@ -95,7 +96,7 @@ impl Config {
             gemini_api_key: env_nonempty("GEMINI_API_KEY")
                 .or_else(|| env_nonempty("HKU_GEMINI_API_KEY")),
             gemini_api_key_header: env_nonempty("GEMINI_API_KEY_HEADER")
-                .unwrap_or_else(|| "Ocp-Apim-Subscription-Key".to_string()),
+                .unwrap_or_else(|| "api-key".to_string()),
             gemini_api_endpoint: env_nonempty("GEMINI_API_ENDPOINT")
                 .or_else(|| env_nonempty("GEMINI_ENDPOINT"))
                 .unwrap_or_else(|| {
@@ -105,6 +106,7 @@ impl Config {
                 .unwrap_or_else(|| "gemini-3-flash-preview".to_string()),
             gemini_thinking_budget: parse_optional_env_usize("GEMINI_THINKING_BUDGET")?,
             gemini_timeout_seconds: parse_env_usize("GEMINI_TIMEOUT_SECONDS", 45)?,
+            gemini_min_interval_seconds: parse_env_usize("GEMINI_MIN_INTERVAL_SECONDS", 21)?,
             whisper_model_path: env_path("WHISPER_MODEL_PATH", "/models/whisper/ggml-large-v3.bin"),
             whisper_cli: env::var("WHISPER_CLI").unwrap_or_else(|_| "whisper-cli".to_string()),
             whisper_threads: parse_env_usize("WHISPER_THREADS", 8)?,
@@ -239,12 +241,13 @@ mod tests {
             ollama_num_thread: 8,
             gemini_ocr_enabled: true,
             gemini_api_key: None,
-            gemini_api_key_header: "Ocp-Apim-Subscription-Key".to_string(),
+            gemini_api_key_header: "api-key".to_string(),
             gemini_api_endpoint:
                 "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string(),
             gemini_deployment_id: "gemini-3-flash-preview".to_string(),
             gemini_thinking_budget: None,
             gemini_timeout_seconds: 45,
+            gemini_min_interval_seconds: 21,
             whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
             whisper_threads: 8,

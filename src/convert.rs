@@ -12,6 +12,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::Stdio,
+    time::Duration,
 };
 use tempfile::tempdir;
 use tokio::{fs, process::Command};
@@ -437,10 +438,16 @@ async fn image_to_markdown(path: &Path, config: &Config, client: &Client) -> Res
         .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| "image".into());
     let mut gemini_disabled_for_job = false;
-    let page_markdown =
-        ocr_document_image_to_markdown(path, config, client, &mut gemini_disabled_for_job)
-            .await
-            .with_context(|| format!("OCR failed for image {}", path.display()))?;
+    let mut last_gemini_attempt = None;
+    let page_markdown = ocr_document_image_to_markdown(
+        path,
+        config,
+        client,
+        &mut gemini_disabled_for_job,
+        &mut last_gemini_attempt,
+    )
+    .await
+    .with_context(|| format!("OCR failed for image {}", path.display()))?;
     Ok(format!("# OCR: {title}\n\n{}\n", page_markdown.trim()))
 }
 
@@ -458,11 +465,17 @@ async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Resul
         .unwrap_or_else(|| "document.pdf".into());
     let mut output = format!("# OCR: {title}\n\n");
     let mut gemini_disabled_for_job = false;
+    let mut last_gemini_attempt = None;
     for (index, page_path) in pages.iter().enumerate() {
-        let page_markdown =
-            ocr_document_image_to_markdown(page_path, config, client, &mut gemini_disabled_for_job)
-                .await
-                .with_context(|| format!("OCR failed for page {}", index + 1))?;
+        let page_markdown = ocr_document_image_to_markdown(
+            page_path,
+            config,
+            client,
+            &mut gemini_disabled_for_job,
+            &mut last_gemini_attempt,
+        )
+        .await
+        .with_context(|| format!("OCR failed for page {}", index + 1))?;
         output.push_str(&format!("## Page {}\n\n", index + 1));
         output.push_str(page_markdown.trim());
         output.push_str("\n\n");
@@ -950,8 +963,10 @@ async fn ocr_document_image_to_markdown(
     config: &Config,
     client: &Client,
     gemini_disabled_for_job: &mut bool,
+    last_gemini_attempt: &mut Option<tokio::time::Instant>,
 ) -> Result<String> {
     if !*gemini_disabled_for_job && gemini_is_configured(config) {
+        wait_for_gemini_rate_limit(config, last_gemini_attempt).await;
         match ocr_document_image_with_gemini(path, config, client).await {
             Ok(markdown) => return Ok(markdown),
             Err(error) => {
@@ -975,6 +990,22 @@ fn gemini_is_configured(config: &Config) -> bool {
             .as_deref()
             .is_some_and(|key| !key.trim().is_empty())
         && !config.gemini_api_endpoint.trim().is_empty()
+}
+
+async fn wait_for_gemini_rate_limit(
+    config: &Config,
+    last_gemini_attempt: &mut Option<tokio::time::Instant>,
+) {
+    let interval = Duration::from_secs(config.gemini_min_interval_seconds as u64);
+    if !interval.is_zero() {
+        if let Some(last_attempt) = *last_gemini_attempt {
+            let elapsed = last_attempt.elapsed();
+            if elapsed < interval {
+                tokio::time::sleep(interval - elapsed).await;
+            }
+        }
+    }
+    *last_gemini_attempt = Some(tokio::time::Instant::now());
 }
 
 async fn ocr_document_image_with_gemini(
@@ -1736,12 +1767,13 @@ mod tests {
             ollama_num_thread: 8,
             gemini_ocr_enabled: true,
             gemini_api_key: None,
-            gemini_api_key_header: "Ocp-Apim-Subscription-Key".to_string(),
+            gemini_api_key_header: "api-key".to_string(),
             gemini_api_endpoint:
                 "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string(),
             gemini_deployment_id: "gemini-3-flash-preview".to_string(),
             gemini_thinking_budget: None,
             gemini_timeout_seconds: 45,
+            gemini_min_interval_seconds: 21,
             whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
             whisper_threads: 8,

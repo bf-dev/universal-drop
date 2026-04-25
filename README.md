@@ -140,11 +140,12 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `OLLAMA_NUM_THREAD` | `8` | Per-request Ollama CPU thread count for OCR/frame analysis. |
 | `GEMINI_OCR_ENABLED` | `true` | Try Gemini first for PDF page OCR and standalone image OCR when an API key is configured. Set to `false` to force local Ollama OCR. |
 | `GEMINI_API_KEY` | unset | HKU/Azure API Management subscription key for Gemini. Keep this in local `.env` or the shell only; never commit it. `HKU_GEMINI_API_KEY` is also accepted as a fallback variable name. |
-| `GEMINI_API_KEY_HEADER` | `Ocp-Apim-Subscription-Key` | Header used for the HKU API Management subscription key. |
+| `GEMINI_API_KEY_HEADER` | `api-key` | Header used for the HKU API Management subscription key. |
 | `GEMINI_API_ENDPOINT` | `https://api.hku.hk/gemini/student/{deployment-id}:generateContent` | Gemini generateContent endpoint template. `{deployment-id}` or `{deployment_id}` is replaced by `GEMINI_DEPLOYMENT_ID`. |
 | `GEMINI_DEPLOYMENT_ID` | `gemini-3-flash-preview` | Gemini model/deployment used for image-to-Markdown OCR. |
 | `GEMINI_THINKING_BUDGET` | unset | Optional `generationConfig.thinkingConfig.thinkingBudget` value. Leave unset unless the gateway requires or benefits from it. |
 | `GEMINI_TIMEOUT_SECONDS` | `45` | Per-image Gemini HTTP timeout. Any timeout falls back to local Ollama OCR. |
+| `GEMINI_MIN_INTERVAL_SECONDS` | `21` | Minimum delay between Gemini OCR requests in the single-worker PDF/image pipeline, matching the student Gemini chat limit of about 3 calls per minute. Set to `0` to disable pacing. |
 | `WHISPER_CLI` | `whisper-cli` | whisper.cpp CLI executable. |
 | `WHISPER_MODEL_PATH` | `/models/whisper/ggml-large-v3.bin` | Mounted Whisper model path. |
 | `WHISPER_THREADS` | `8` | whisper.cpp compute threads. |
