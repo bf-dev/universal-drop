@@ -395,7 +395,7 @@ mod tests {
                 "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string(),
             gemini_deployment_id: "gemini-3-flash-preview".to_string(),
             gemini_thinking_budget: None,
-            gemini_timeout_seconds: 45,
+            gemini_timeout_seconds: 180,
             gemini_min_interval_seconds: 21,
             whisper_model_path: root.join("models/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),

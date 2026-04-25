@@ -144,7 +144,7 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `GEMINI_API_ENDPOINT` | `https://api.hku.hk/gemini/student/{deployment-id}:generateContent` | Gemini generateContent endpoint template. `{deployment-id}` or `{deployment_id}` is replaced by `GEMINI_DEPLOYMENT_ID`. |
 | `GEMINI_DEPLOYMENT_ID` | `gemini-3-flash-preview` | Gemini model/deployment used for image-to-Markdown OCR. |
 | `GEMINI_THINKING_BUDGET` | unset | Optional `generationConfig.thinkingConfig.thinkingBudget` value. Leave unset unless the gateway requires or benefits from it. |
-| `GEMINI_TIMEOUT_SECONDS` | `45` | Per-image Gemini HTTP timeout. Any timeout falls back to local Ollama OCR. |
+| `GEMINI_TIMEOUT_SECONDS` | `180` | Per-image Gemini HTTP timeout. Any timeout falls back to local Ollama OCR. |
 | `GEMINI_MIN_INTERVAL_SECONDS` | `21` | Minimum delay between Gemini OCR requests in the single-worker PDF/image pipeline, matching the student Gemini chat limit of about 3 calls per minute. Set to `0` to disable pacing. |
 | `WHISPER_CLI` | `whisper-cli` | whisper.cpp CLI executable. |
 | `WHISPER_MODEL_PATH` | `/models/whisper/ggml-large-v3.bin` | Mounted Whisper model path. |

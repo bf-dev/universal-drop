@@ -105,7 +105,7 @@ impl Config {
             gemini_deployment_id: env_nonempty("GEMINI_DEPLOYMENT_ID")
                 .unwrap_or_else(|| "gemini-3-flash-preview".to_string()),
             gemini_thinking_budget: parse_optional_env_usize("GEMINI_THINKING_BUDGET")?,
-            gemini_timeout_seconds: parse_env_usize("GEMINI_TIMEOUT_SECONDS", 45)?,
+            gemini_timeout_seconds: parse_env_usize("GEMINI_TIMEOUT_SECONDS", 180)?,
             gemini_min_interval_seconds: parse_env_usize("GEMINI_MIN_INTERVAL_SECONDS", 21)?,
             whisper_model_path: env_path("WHISPER_MODEL_PATH", "/models/whisper/ggml-large-v3.bin"),
             whisper_cli: env::var("WHISPER_CLI").unwrap_or_else(|_| "whisper-cli".to_string()),
@@ -246,7 +246,7 @@ mod tests {
                 "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string(),
             gemini_deployment_id: "gemini-3-flash-preview".to_string(),
             gemini_thinking_budget: None,
-            gemini_timeout_seconds: 45,
+            gemini_timeout_seconds: 180,
             gemini_min_interval_seconds: 21,
             whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
