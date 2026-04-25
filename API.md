@@ -13,7 +13,7 @@ Current Docker defaults mount three host data directories:
 | Purpose | Host directory | Container directory |
 | --- | --- | --- |
 | Input/drop folder | `/home/bfdev/Documents/universal-drop-input` | `/data/input` |
-| Markdown results | `/home/bfdev/Documents/notes/ai_process_dump` | `/data/results` |
+| Markdown results | `/home/bfdev/Documents/universal-drop-outputs` | `/data/results` |
 | Successful-original archive | `/home/bfdev/Documents/universal-drop-archive` | `/data/archive` |
 
 Override them with `DROP_INPUT_DIR`, `DROP_RESULTS_DIR`, and `DROP_ARCHIVE_DIR` when starting Docker Compose.
@@ -146,7 +146,7 @@ You can skip the upload endpoint and drop files directly into the input volume:
 cp ./example.pdf ~/Documents/universal-drop-input/
 ```
 
-The service watches the input directory, converts the file, writes Markdown to `~/Documents/notes/ai_process_dump/<original-name>.md`, and moves the original into `~/Documents/universal-drop-archive/` after success.
+The service watches the input directory, converts the file, writes Markdown to `~/Documents/universal-drop-outputs/<original-name>.md`, and moves the original into `~/Documents/universal-drop-archive/` after success.
 
 ## Conversion notes
 

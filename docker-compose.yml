@@ -44,7 +44,7 @@ services:
       RUST_LOG: info
     volumes:
       - ${DROP_INPUT_DIR:-/home/bfdev/Documents/universal-drop-input}:/data/input
-      - ${DROP_RESULTS_DIR:-/home/bfdev/Documents/notes/ai_process_dump}:/data/results
+      - ${DROP_RESULTS_DIR:-/home/bfdev/Documents/universal-drop-outputs}:/data/results
       - ${DROP_ARCHIVE_DIR:-/home/bfdev/Documents/universal-drop-archive}:/data/archive
       - ${WHISPER_MODELS_DIR:-/home/bfdev/Documents/universal-drop-models/whisper}:/models/whisper:ro
     depends_on:
