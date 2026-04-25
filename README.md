@@ -10,7 +10,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 - Moves successfully converted originals to `ARCHIVE_DIR`.
 - Leaves failed inputs in place and exposes the error through `/jobs/{id}`.
 - Accepts plain text through `/text` and auto-detects HTTP(S) URLs in `.txt` drops.
-- OCRs every PDF page through Ollama using `glm-ocr` with `keep_alive: "30m"`.
+- OCRs PDF pages and standalone image files with the HKU Vertex AI Gemini endpoint first, using `gemini-3-flash-preview` by default, then falls back to local Ollama `glm-ocr` if Gemini is unavailable, rate-limited, or not configured.
 - Auto-detects and corrects whole-page PDF render orientation with native OpenCV before OCR, rotating only by 90/180/270 degrees when confidence is high enough. It never performs small-angle deskew rotations.
 - Runs `whisper.cpp` only as a subprocess during audio transcription jobs, with CPU-native/OpenBLAS build acceleration and fast large-v3 decoding defaults.
 - Converts videos into Markdown by transcribing audio with Whisper large-v3 and analyzing only selected significant visual frames with local Ollama.
@@ -23,7 +23,8 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 | `.txt`, `.text`, `.url`, `.urls` | Normalize to Markdown text and auto-detect HTTP(S) URLs for URL conversion. |
 | `.md`, code/config text files | Normalize to Markdown text without URL expansion. |
 | `.csv`, `.tsv` | Convert to a Markdown table, capped by `MAX_CSV_ROWS`. |
-| `.pdf` | Render every page with Poppler, auto-orient whole upside-down/sideways page renders with native OpenCV, confirm proposed rotations with local Tesseract OCR scoring, and OCR each page with Ollama `glm-ocr`; default render DPI is tuned lower for CPU OCR speed. |
+| `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif` | OCR the image into faithful Markdown with Gemini first, falling back to local Ollama `glm-ocr` if the API call fails or Gemini is not configured. |
+| `.pdf` | Render every page with Poppler, auto-orient whole upside-down/sideways page renders with native OpenCV, confirm proposed rotations with local Tesseract OCR scoring, and OCR each page into faithful Markdown with Gemini first and local Ollama `glm-ocr` fallback; default render DPI is tuned lower for CPU OCR speed. |
 | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, etc. | Normalize with `ffmpeg`, transcribe with `whisper.cpp`, collapse consecutive duplicate Whisper lines, then write a transcript Markdown file. |
 | `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, etc. | Extract audio for Whisper large-v3, use FFmpeg scene-change detection plus sparse fallback samples, compare selected frames through local Ollama, and write a bounded Markdown summary. |
 | `.doc`, `.docx`, `.odt`, `.pptx`, `.xlsx`, etc. | Try Pandoc first, then headless LibreOffice text conversion. |
@@ -42,6 +43,13 @@ mkdir -p \
 APP_PORT=9360 docker compose up --build -d
 
 docker compose exec ollama ollama pull glm-ocr
+```
+
+To enable Gemini OCR, put the subscription key in your local, gitignored `.env` file or export it before starting Compose:
+
+```bash
+GEMINI_API_KEY=<your-hku-subscription-key>
+GEMINI_DEPLOYMENT_ID=gemini-3-flash-preview
 ```
 
 Place a whisper.cpp-compatible multilingual large-v3 model at:
@@ -130,6 +138,13 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `OLLAMA_MODEL` | `glm-ocr` | Multimodal OCR model. |
 | `OLLAMA_KEEP_ALIVE` | `30m` | Sent in PDF/video OCR requests and mirrored in compose for Ollama to reduce model reloads. |
 | `OLLAMA_NUM_THREAD` | `8` | Per-request Ollama CPU thread count for OCR/frame analysis. |
+| `GEMINI_OCR_ENABLED` | `true` | Try Gemini first for PDF page OCR and standalone image OCR when an API key is configured. Set to `false` to force local Ollama OCR. |
+| `GEMINI_API_KEY` | unset | HKU/Azure API Management subscription key for Gemini. Keep this in local `.env` or the shell only; never commit it. `HKU_GEMINI_API_KEY` is also accepted as a fallback variable name. |
+| `GEMINI_API_KEY_HEADER` | `Ocp-Apim-Subscription-Key` | Header used for the HKU API Management subscription key. |
+| `GEMINI_API_ENDPOINT` | `https://api.hku.hk/gemini/student/{deployment-id}:generateContent` | Gemini generateContent endpoint template. `{deployment-id}` or `{deployment_id}` is replaced by `GEMINI_DEPLOYMENT_ID`. |
+| `GEMINI_DEPLOYMENT_ID` | `gemini-3-flash-preview` | Gemini model/deployment used for image-to-Markdown OCR. |
+| `GEMINI_THINKING_BUDGET` | unset | Optional `generationConfig.thinkingConfig.thinkingBudget` value. Leave unset unless the gateway requires or benefits from it. |
+| `GEMINI_TIMEOUT_SECONDS` | `45` | Per-image Gemini HTTP timeout. Any timeout falls back to local Ollama OCR. |
 | `WHISPER_CLI` | `whisper-cli` | whisper.cpp CLI executable. |
 | `WHISPER_MODEL_PATH` | `/models/whisper/ggml-large-v3.bin` | Mounted Whisper model path. |
 | `WHISPER_THREADS` | `8` | whisper.cpp compute threads. |
@@ -176,7 +191,7 @@ cargo run
 
 ## Notes
 
-- PDF conversion always uses OCR; there is intentionally no text-first fallback in the MVP.
+- PDF and image conversion always use OCR; there is intentionally no text-first fallback in the MVP. Gemini is tried first for page/image Markdown conversion, and any Gemini HTTP/parsing/network failure disables Gemini for the rest of that job and falls back to local Ollama `glm-ocr`.
 - Video conversion does not analyze every frame. It uses FFmpeg scene detection with a configured min/max frame budget, then asks local Ollama to describe the first key frame and compare each selected frame to the previous selected frame.
 - URL conversion omits source URLs from generated URL section headings and command failure logs to avoid accidental disclosure in logs. The original submitted text is still preserved in the Markdown for `.txt`/text drops.
 - On Fedora Asahi Remix, the Dockerized Ollama image is configured to opt into experimental Vulkan and receives `/dev/dri`, but current arm64 Ollama still falls back to CPU on this Apple GPU stack. OCR speedups therefore come from CPU threads, keep-alive, lower PDF DPI, and fewer video frames.

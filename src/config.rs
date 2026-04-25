@@ -16,6 +16,13 @@ pub struct Config {
     pub ollama_model: String,
     pub ollama_keep_alive: String,
     pub ollama_num_thread: usize,
+    pub gemini_ocr_enabled: bool,
+    pub gemini_api_key: Option<String>,
+    pub gemini_api_key_header: String,
+    pub gemini_api_endpoint: String,
+    pub gemini_deployment_id: String,
+    pub gemini_thinking_budget: Option<usize>,
+    pub gemini_timeout_seconds: usize,
     pub whisper_model_path: PathBuf,
     pub whisper_cli: String,
     pub whisper_threads: usize,
@@ -84,6 +91,20 @@ impl Config {
             ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "glm-ocr".to_string()),
             ollama_keep_alive: env::var("OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "30m".to_string()),
             ollama_num_thread: parse_env_usize("OLLAMA_NUM_THREAD", 8)?,
+            gemini_ocr_enabled: parse_env_bool("GEMINI_OCR_ENABLED", true)?,
+            gemini_api_key: env_nonempty("GEMINI_API_KEY")
+                .or_else(|| env_nonempty("HKU_GEMINI_API_KEY")),
+            gemini_api_key_header: env_nonempty("GEMINI_API_KEY_HEADER")
+                .unwrap_or_else(|| "Ocp-Apim-Subscription-Key".to_string()),
+            gemini_api_endpoint: env_nonempty("GEMINI_API_ENDPOINT")
+                .or_else(|| env_nonempty("GEMINI_ENDPOINT"))
+                .unwrap_or_else(|| {
+                    "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string()
+                }),
+            gemini_deployment_id: env_nonempty("GEMINI_DEPLOYMENT_ID")
+                .unwrap_or_else(|| "gemini-3-flash-preview".to_string()),
+            gemini_thinking_budget: parse_optional_env_usize("GEMINI_THINKING_BUDGET")?,
+            gemini_timeout_seconds: parse_env_usize("GEMINI_TIMEOUT_SECONDS", 45)?,
             whisper_model_path: env_path("WHISPER_MODEL_PATH", "/models/whisper/ggml-large-v3.bin"),
             whisper_cli: env::var("WHISPER_CLI").unwrap_or_else(|_| "whisper-cli".to_string()),
             whisper_threads: parse_env_usize("WHISPER_THREADS", 8)?,
@@ -155,12 +176,29 @@ fn env_path(key: &str, default: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(default))
 }
 
+fn env_nonempty(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn parse_env_usize(key: &str, default: usize) -> Result<usize> {
     match env::var(key) {
         Ok(value) => value
             .parse::<usize>()
             .with_context(|| format!("{key} must be a positive integer")),
         Err(_) => Ok(default),
+    }
+}
+
+fn parse_optional_env_usize(key: &str) -> Result<Option<usize>> {
+    match env_nonempty(key) {
+        Some(value) => value
+            .parse::<usize>()
+            .map(Some)
+            .with_context(|| format!("{key} must be a positive integer")),
+        None => Ok(None),
     }
 }
 
@@ -199,6 +237,14 @@ mod tests {
             ollama_model: "glm-ocr".to_string(),
             ollama_keep_alive: "30m".to_string(),
             ollama_num_thread: 8,
+            gemini_ocr_enabled: true,
+            gemini_api_key: None,
+            gemini_api_key_header: "Ocp-Apim-Subscription-Key".to_string(),
+            gemini_api_endpoint:
+                "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string(),
+            gemini_deployment_id: "gemini-3-flash-preview".to_string(),
+            gemini_thinking_budget: None,
+            gemini_timeout_seconds: 45,
             whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
             whisper_threads: 8,

@@ -2,7 +2,10 @@ use crate::config::Config;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use mime_guess::MimeGuess;
-use reqwest::Client;
+use reqwest::{
+    Client,
+    header::{HeaderName, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -19,6 +22,7 @@ pub enum ConversionRoute {
     PlainText,
     Markdown,
     Csv(u8),
+    Image,
     Pdf,
     Audio,
     Video,
@@ -36,6 +40,7 @@ pub async fn convert_to_markdown(path: &Path, config: &Config, client: &Client) 
         ConversionRoute::Csv(delimiter) => {
             csv_to_markdown(path, delimiter, config.max_csv_rows).await?
         }
+        ConversionRoute::Image => image_to_markdown(path, config, client).await?,
         ConversionRoute::Pdf => pdf_to_markdown(path, config, client).await?,
         ConversionRoute::Audio => audio_to_markdown(path, config).await?,
         ConversionRoute::Video => video_to_markdown(path, config, client).await?,
@@ -62,6 +67,9 @@ pub fn detect_route(path: &Path) -> ConversionRoute {
         }
         Some("csv") => return ConversionRoute::Csv(b','),
         Some("tsv") => return ConversionRoute::Csv(b'\t'),
+        Some(
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "heic" | "heif",
+        ) => return ConversionRoute::Image,
         Some("pdf") => return ConversionRoute::Pdf,
         Some("mp3" | "wav" | "m4a" | "flac" | "ogg" | "opus" | "aac" | "wma" | "aiff" | "aif") => {
             return ConversionRoute::Audio;
@@ -81,6 +89,7 @@ pub fn detect_route(path: &Path) -> ConversionRoute {
         .map(|mime| (mime.type_().as_str(), mime.subtype().as_str()))
     {
         Some(("text", _)) => ConversionRoute::PlainText,
+        Some(("image", _)) => ConversionRoute::Image,
         Some(("application", "pdf")) => ConversionRoute::Pdf,
         Some(("audio", _)) => ConversionRoute::Audio,
         Some(("video", _)) => ConversionRoute::Video,
@@ -230,6 +239,11 @@ async fn try_yt_dlp_to_markdown(
     let downloaded_files = collect_downloaded_files(workdir.path()).await?;
     for downloaded_file in downloaded_files {
         match detect_route(&downloaded_file) {
+            ConversionRoute::Image => {
+                return image_to_markdown(&downloaded_file, config, client)
+                    .await
+                    .map(Some);
+            }
             ConversionRoute::Video => {
                 return video_to_markdown(&downloaded_file, config, client)
                     .await
@@ -417,6 +431,19 @@ fn escape_table_cell(value: &str) -> String {
         .to_string()
 }
 
+async fn image_to_markdown(path: &Path, config: &Config, client: &Client) -> Result<String> {
+    let title = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "image".into());
+    let mut gemini_disabled_for_job = false;
+    let page_markdown =
+        ocr_document_image_to_markdown(path, config, client, &mut gemini_disabled_for_job)
+            .await
+            .with_context(|| format!("OCR failed for image {}", path.display()))?;
+    Ok(format!("# OCR: {title}\n\n{}\n", page_markdown.trim()))
+}
+
 async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Result<String> {
     let workdir = tempdir().context("failed to create temporary PDF render directory")?;
     let pages = render_pdf_pages(path, workdir.path(), config.pdf_render_dpi).await?;
@@ -430,10 +457,12 @@ async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Resul
         .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| "document.pdf".into());
     let mut output = format!("# OCR: {title}\n\n");
+    let mut gemini_disabled_for_job = false;
     for (index, page_path) in pages.iter().enumerate() {
-        let page_markdown = ocr_page_with_ollama(page_path, config, client)
-            .await
-            .with_context(|| format!("Ollama OCR failed for page {}", index + 1))?;
+        let page_markdown =
+            ocr_document_image_to_markdown(page_path, config, client, &mut gemini_disabled_for_job)
+                .await
+                .with_context(|| format!("OCR failed for page {}", index + 1))?;
         output.push_str(&format!("## Page {}\n\n", index + 1));
         output.push_str(page_markdown.trim());
         output.push_str("\n\n");
@@ -803,6 +832,98 @@ fn is_ocr_signal_char(ch: char) -> bool {
         || ('\u{3040}'..='\u{30ff}').contains(&ch)
 }
 
+const OCR_SYSTEM_PROMPT: &str = "\
+You are a precise OCR-to-Markdown conversion engine. Convert only visible image content into clean Markdown. Preserve reading order, headings, paragraphs, lists, tables, form labels, checkboxes, code blocks, page numbers, captions, and the original language/script. Do not summarize, explain, infer hidden content, or mention OCR. Use [illegible] only for text that is visible but unreadable.";
+
+const OCR_USER_PROMPT: &str = "\
+Convert this page image to faithful Markdown.
+
+Requirements:
+- Output Markdown only.
+- Preserve visible text exactly, including original language, punctuation, casing, and numbers.
+- Preserve tables as GitHub-flavored Markdown tables when practical; otherwise use line-preserving Markdown.
+- Preserve headings, lists, checkboxes, form labels, signatures, stamps, captions, and footnotes.
+- Keep natural reading order for the page layout.
+- Do not add commentary, confidence notes, source URLs, or invented content.";
+
+#[derive(Debug, Serialize)]
+struct GeminiGenerateRequest<'a> {
+    system_instruction: GeminiSystemInstruction<'a>,
+    contents: Vec<GeminiContent<'a>>,
+    #[serde(rename = "generationConfig")]
+    generation_config: GeminiGenerationConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiSystemInstruction<'a> {
+    parts: Vec<GeminiTextPart<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiTextPart<'a> {
+    text: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiContent<'a> {
+    role: &'a str,
+    parts: Vec<GeminiRequestPart<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiRequestPart<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    #[serde(rename = "inline_data", skip_serializing_if = "Option::is_none")]
+    inline_data: Option<GeminiInlineData<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiInlineData<'a> {
+    #[serde(rename = "mime_type")]
+    mime_type: &'a str,
+    data: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiGenerationConfig {
+    temperature: f32,
+    #[serde(rename = "topP")]
+    top_p: f32,
+    #[serde(rename = "topK")]
+    top_k: usize,
+    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<GeminiThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiThinkingConfig {
+    #[serde(rename = "thinkingBudget")]
+    thinking_budget: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiGenerateResponse {
+    candidates: Vec<GeminiCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    content: Option<GeminiResponseContent>,
+    #[serde(rename = "finishReason")]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiResponseContent {
+    parts: Vec<GeminiResponsePart>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiResponsePart {
+    text: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct OllamaGenerateRequest<'a> {
     model: &'a str,
@@ -824,9 +945,191 @@ struct OllamaGenerateResponse {
     response: String,
 }
 
-async fn ocr_page_with_ollama(path: &Path, config: &Config, client: &Client) -> Result<String> {
-    let prompt = "Read this document page using OCR. Return faithful Markdown only. Preserve tables, headings, lists, reading order, and visible text. Do not add commentary.";
-    generate_with_ollama_images(&[path], prompt, config, client).await
+async fn ocr_document_image_to_markdown(
+    path: &Path,
+    config: &Config,
+    client: &Client,
+    gemini_disabled_for_job: &mut bool,
+) -> Result<String> {
+    if !*gemini_disabled_for_job && gemini_is_configured(config) {
+        match ocr_document_image_with_gemini(path, config, client).await {
+            Ok(markdown) => return Ok(markdown),
+            Err(error) => {
+                *gemini_disabled_for_job = true;
+                warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Gemini OCR failed; falling back to local GLM/Ollama OCR for the rest of this job"
+                );
+            }
+        }
+    }
+
+    ocr_document_image_with_local_glm(path, config, client).await
+}
+
+fn gemini_is_configured(config: &Config) -> bool {
+    config.gemini_ocr_enabled
+        && config
+            .gemini_api_key
+            .as_deref()
+            .is_some_and(|key| !key.trim().is_empty())
+        && !config.gemini_api_endpoint.trim().is_empty()
+}
+
+async fn ocr_document_image_with_gemini(
+    path: &Path,
+    config: &Config,
+    client: &Client,
+) -> Result<String> {
+    let api_key = config
+        .gemini_api_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .context("GEMINI_API_KEY is not configured")?;
+    let image_bytes = fs::read(path)
+        .await
+        .with_context(|| format!("failed to read image {}", path.display()))?;
+    let image_base64 = BASE64.encode(image_bytes);
+    let mime_type = image_mime_type(path);
+    let thinking_config = config
+        .gemini_thinking_budget
+        .map(|thinking_budget| GeminiThinkingConfig { thinking_budget });
+    let request = GeminiGenerateRequest {
+        system_instruction: GeminiSystemInstruction {
+            parts: vec![GeminiTextPart {
+                text: OCR_SYSTEM_PROMPT,
+            }],
+        },
+        contents: vec![GeminiContent {
+            role: "user",
+            parts: vec![
+                GeminiRequestPart {
+                    text: Some(OCR_USER_PROMPT),
+                    inline_data: None,
+                },
+                GeminiRequestPart {
+                    text: None,
+                    inline_data: Some(GeminiInlineData {
+                        mime_type: &mime_type,
+                        data: &image_base64,
+                    }),
+                },
+            ],
+        }],
+        generation_config: GeminiGenerationConfig {
+            temperature: 0.0,
+            top_p: 0.1,
+            top_k: 1,
+            thinking_config,
+        },
+    };
+
+    let header_name = HeaderName::from_bytes(config.gemini_api_key_header.as_bytes())
+        .with_context(|| {
+            format!(
+                "invalid GEMINI_API_KEY_HEADER {}",
+                config.gemini_api_key_header
+            )
+        })?;
+    let header_value = HeaderValue::from_str(api_key)
+        .context("GEMINI_API_KEY contains an invalid header value")?;
+    let response = client
+        .post(gemini_generate_content_url(config))
+        .header(header_name, header_value)
+        .timeout(std::time::Duration::from_secs(
+            config.gemini_timeout_seconds as u64,
+        ))
+        .json(&request)
+        .send()
+        .await
+        .context("failed to call Gemini generateContent API")?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read Gemini response body")?;
+    if !status.is_success() {
+        bail!(
+            "Gemini returned HTTP {status}: {}",
+            response_body_snippet(&body)
+        );
+    }
+    let parsed: GeminiGenerateResponse = serde_json::from_str(&body).with_context(|| {
+        format!(
+            "failed to parse Gemini JSON response: {}",
+            response_body_snippet(&body)
+        )
+    })?;
+    extract_gemini_text(parsed)
+}
+
+fn image_mime_type(path: &Path) -> String {
+    MimeGuess::from_path(path)
+        .first()
+        .filter(|mime| mime.type_().as_str() == "image")
+        .map(|mime| mime.essence_str().to_string())
+        .unwrap_or_else(|| "image/jpeg".to_string())
+}
+
+fn gemini_generate_content_url(config: &Config) -> String {
+    let endpoint = config.gemini_api_endpoint.trim();
+    if endpoint.contains("{deployment-id}") {
+        endpoint.replace("{deployment-id}", &config.gemini_deployment_id)
+    } else if endpoint.contains("{deployment_id}") {
+        endpoint.replace("{deployment_id}", &config.gemini_deployment_id)
+    } else {
+        endpoint.to_string()
+    }
+}
+
+fn extract_gemini_text(response: GeminiGenerateResponse) -> Result<String> {
+    let mut finish_reasons = Vec::new();
+    for candidate in response.candidates {
+        if let Some(reason) = candidate.finish_reason {
+            finish_reasons.push(reason);
+        }
+        let Some(content) = candidate.content else {
+            continue;
+        };
+        let text = content
+            .parts
+            .into_iter()
+            .filter_map(|part| part.text)
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !text.trim().is_empty() {
+            return Ok(text);
+        }
+    }
+
+    if finish_reasons.is_empty() {
+        bail!("Gemini response did not contain Markdown text")
+    } else {
+        bail!(
+            "Gemini response did not contain Markdown text; finish reasons: {}",
+            finish_reasons.join(", ")
+        )
+    }
+}
+
+fn response_body_snippet(body: &str) -> String {
+    const MAX_CHARS: usize = 600;
+    let mut snippet = body.chars().take(MAX_CHARS).collect::<String>();
+    if body.chars().count() > MAX_CHARS {
+        snippet.push_str("...");
+    }
+    snippet
+}
+
+async fn ocr_document_image_with_local_glm(
+    path: &Path,
+    config: &Config,
+    client: &Client,
+) -> Result<String> {
+    generate_with_ollama_images(&[path], OCR_USER_PROMPT, config, client).await
 }
 
 async fn generate_with_ollama_images(
@@ -1412,12 +1715,60 @@ fn ensure_success(program: &str, args: &[OsString], output: &std::process::Outpu
 
 #[cfg(test)]
 mod tests {
+    use crate::Config;
+
     use super::{
         ConversionRoute, collapse_consecutive_repeated_transcript_lines, csv_bytes_to_markdown,
-        detect_route, extract_urls, fallback_frame_timestamps, normalize_markdown,
-        orientation_ocr_text_score, should_autodetect_urls,
+        detect_route, extract_urls, fallback_frame_timestamps, gemini_generate_content_url,
+        normalize_markdown, orientation_ocr_text_score, should_autodetect_urls,
     };
-    use std::path::Path;
+    use std::{net::SocketAddr, path::Path, path::PathBuf, time::Duration};
+
+    fn test_config() -> Config {
+        Config {
+            input_dir: PathBuf::from("/tmp/input"),
+            results_dir: PathBuf::from("/tmp/results"),
+            archive_dir: PathBuf::from("/tmp/archive"),
+            bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
+            ollama_base_url: "http://localhost:11434".to_string(),
+            ollama_model: "glm-ocr".to_string(),
+            ollama_keep_alive: "30m".to_string(),
+            ollama_num_thread: 8,
+            gemini_ocr_enabled: true,
+            gemini_api_key: None,
+            gemini_api_key_header: "Ocp-Apim-Subscription-Key".to_string(),
+            gemini_api_endpoint:
+                "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string(),
+            gemini_deployment_id: "gemini-3-flash-preview".to_string(),
+            gemini_thinking_budget: None,
+            gemini_timeout_seconds: 45,
+            whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
+            whisper_cli: "whisper-cli".to_string(),
+            whisper_threads: 8,
+            whisper_processors: 1,
+            whisper_beam_size: 1,
+            whisper_best_of: 1,
+            whisper_no_fallback: true,
+            pdf_render_dpi: 150,
+            pdf_auto_orient: true,
+            pdf_auto_orient_cli: "pdf-page-auto-orient".to_string(),
+            pdf_orient_ocr_confirm: true,
+            pdf_orient_ocr_cli: "tesseract".to_string(),
+            pdf_orient_ocr_lang: "eng".to_string(),
+            pdf_orient_ocr_min_confidence: 0.60,
+            pdf_orient_ocr_min_score: 20.0,
+            url_max_per_text: 8,
+            yt_dlp_cli: "yt-dlp".to_string(),
+            headless_browser_cli: "chromium".to_string(),
+            webpage_capture_virtual_time_ms: 5_000,
+            video_min_frames: 3,
+            video_max_frames: 24,
+            video_scene_threshold: 0.35,
+            max_csv_rows: 1_000,
+            file_stability_checks: 1,
+            file_stability_delay: Duration::from_millis(1),
+        }
+    }
 
     #[test]
     fn detects_routes_by_extension() {
@@ -1434,6 +1785,7 @@ mod tests {
             detect_route(Path::new("data.tsv")),
             ConversionRoute::Csv(b'\t')
         );
+        assert_eq!(detect_route(Path::new("scan.jpg")), ConversionRoute::Image);
         assert_eq!(detect_route(Path::new("voice.mp3")), ConversionRoute::Audio);
         assert_eq!(
             detect_route(Path::new("screen.mp4")),
@@ -1495,6 +1847,15 @@ mod tests {
         assert!(should_autodetect_urls(Path::new("recording.url")));
         assert!(!should_autodetect_urls(Path::new("notes.md")));
         assert!(!should_autodetect_urls(Path::new("script.ts")));
+    }
+
+    #[test]
+    fn gemini_endpoint_template_uses_configured_deployment() {
+        let config = test_config();
+        assert_eq!(
+            gemini_generate_content_url(&config),
+            "https://api.hku.hk/gemini/student/gemini-3-flash-preview:generateContent"
+        );
     }
 
     #[test]
