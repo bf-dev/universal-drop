@@ -14,8 +14,8 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     config.ensure_dirs()?;
     let bind_addr = config.bind_addr;
-    let (state, rx) = build_state(config);
-    let _worker = start_worker(state.clone(), rx);
+    let state = build_state(config);
+    let _worker = start_worker(state.clone());
     let queued = scan_input_dir(&state).await?;
     if !queued.is_empty() {
         info!(count = queued.len(), "queued files discovered at startup");

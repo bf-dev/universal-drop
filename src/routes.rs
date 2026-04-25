@@ -1,6 +1,6 @@
 use crate::{
     jobs::{Job, JobStatus},
-    service::{AppState, sanitize_filename, unique_path_for_filename},
+    service::{AppState, QueuePriority, sanitize_filename, unique_path_for_filename},
 };
 use axum::{
     Json, Router,
@@ -54,8 +54,10 @@ struct TextUploadRequest {
 
 async fn upload_files(
     State(state): State<AppState>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<UploadResponse>), ApiError> {
+    let priority = queue_priority_from_headers(&headers);
     let mut jobs = Vec::new();
 
     while let Some(mut field) = multipart.next_field().await? {
@@ -75,7 +77,7 @@ async fn upload_files(
         drop(file);
 
         fs::rename(&temp_path, &final_path).await?;
-        let job = state.enqueue_path(final_path)?;
+        let job = state.enqueue_path_with_priority(final_path, priority)?;
         jobs.push(job);
     }
 
@@ -105,12 +107,42 @@ async fn upload_text(
 
     fs::write(&temp_path, text.as_bytes()).await?;
     fs::rename(&temp_path, &final_path).await?;
-    let job = state.enqueue_path(final_path)?;
+    let priority = queue_priority_from_headers(&headers);
+    let job = state.enqueue_path_with_priority(final_path, priority)?;
 
     Ok((
         StatusCode::CREATED,
         Json(UploadResponse { jobs: vec![job] }),
     ))
+}
+
+const PRIORITY_HEADER: &str = "x-universal-drop-priority";
+const SOURCE_HEADER: &str = "x-universal-drop-source";
+
+fn queue_priority_from_headers(headers: &HeaderMap) -> QueuePriority {
+    let priority = headers
+        .get(PRIORITY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("");
+    let source = headers
+        .get(SOURCE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("");
+
+    if matches_priority_value(priority) || source.eq_ignore_ascii_case("cli") {
+        QueuePriority::High
+    } else {
+        QueuePriority::Normal
+    }
+}
+
+fn matches_priority_value(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "high" | "priority" | "prioritized" | "cli" | "front" | "first"
+    )
 }
 
 fn parse_text_upload(
@@ -272,7 +304,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let config = test_config(temp.path());
         config.ensure_dirs().unwrap();
-        let (state, _rx) = build_state(config);
+        let state = build_state(config);
         let app = router(state);
 
         let response = app
@@ -297,7 +329,7 @@ mod tests {
         let config = test_config(temp.path());
         config.ensure_dirs().unwrap();
         let input_dir = config.input_dir.clone();
-        let (state, _rx) = build_state(config);
+        let state = build_state(config);
         let app = router(state);
 
         let boundary = "universal-drop-test-boundary";
@@ -341,7 +373,7 @@ mod tests {
         let config = test_config(temp.path());
         config.ensure_dirs().unwrap();
         let input_dir = config.input_dir.clone();
-        let (state, _rx) = build_state(config);
+        let state = build_state(config);
         let app = router(state);
 
         let response = app

@@ -6,16 +6,12 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::SystemTime,
 };
-use tokio::{
-    fs,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    task::JoinHandle,
-    time::sleep,
-};
+use tokio::{fs, sync::Notify, task::JoinHandle, time::sleep};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
@@ -24,22 +20,84 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub jobs: JobStore,
     pub client: Client,
-    queue: UnboundedSender<Uuid>,
+    queue: JobQueue,
 }
 
-pub fn build_state(config: Config) -> (AppState, UnboundedReceiver<Uuid>) {
-    let (queue, rx) = mpsc::unbounded_channel();
-    let state = AppState {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueuePriority {
+    Normal,
+    High,
+}
+
+#[derive(Debug, Default)]
+struct QueueInner {
+    high_priority: VecDeque<Uuid>,
+    normal_priority: VecDeque<Uuid>,
+}
+
+#[derive(Clone, Debug)]
+struct JobQueue {
+    inner: Arc<Mutex<QueueInner>>,
+    notify: Arc<Notify>,
+}
+
+impl Default for JobQueue {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(QueueInner::default())),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+}
+
+impl JobQueue {
+    fn push(&self, job_id: Uuid, priority: QueuePriority) {
+        let mut queue = self.inner.lock().expect("job queue mutex poisoned");
+        match priority {
+            QueuePriority::High => queue.high_priority.push_back(job_id),
+            QueuePriority::Normal => queue.normal_priority.push_back(job_id),
+        }
+        drop(queue);
+        self.notify.notify_one();
+    }
+
+    async fn pop(&self) -> Uuid {
+        loop {
+            if let Some(job_id) = self.pop_now() {
+                return job_id;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    fn pop_now(&self) -> Option<Uuid> {
+        let mut queue = self.inner.lock().expect("job queue mutex poisoned");
+        queue
+            .high_priority
+            .pop_front()
+            .or_else(|| queue.normal_priority.pop_front())
+    }
+}
+
+pub fn build_state(config: Config) -> AppState {
+    AppState {
         config: Arc::new(config),
         jobs: JobStore::new(),
         client: Client::new(),
-        queue,
-    };
-    (state, rx)
+        queue: JobQueue::default(),
+    }
 }
 
 impl AppState {
     pub fn enqueue_path(&self, path: impl Into<PathBuf>) -> Result<Job> {
+        self.enqueue_path_with_priority(path, QueuePriority::Normal)
+    }
+
+    pub fn enqueue_path_with_priority(
+        &self,
+        path: impl Into<PathBuf>,
+        priority: QueuePriority,
+    ) -> Result<Job> {
         let path = path.into();
         if should_ignore_input_path(&path) {
             bail!("ignored transient input path {}", path.display());
@@ -52,11 +110,13 @@ impl AppState {
         let result_path = self.config.result_path_for(&input_path);
         let (job, should_enqueue) = self.jobs.create_or_get(input_path.clone(), result_path);
         if should_enqueue {
-            if let Err(error) = self.queue.send(job.id) {
-                self.jobs.mark_failed(job.id, "worker queue is closed");
-                bail!("failed to queue {}: {error}", input_path.display());
-            }
-            info!(job_id = %job.id, path = %input_path.display(), "queued conversion job");
+            self.queue.push(job.id, priority);
+            info!(
+                job_id = %job.id,
+                path = %input_path.display(),
+                priority = ?priority,
+                "queued conversion job"
+            );
         } else {
             debug!(job_id = %job.id, path = %input_path.display(), "file already has an active job");
         }
@@ -64,9 +124,10 @@ impl AppState {
     }
 }
 
-pub fn start_worker(state: AppState, mut rx: UnboundedReceiver<Uuid>) -> JoinHandle<()> {
+pub fn start_worker(state: AppState) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(job_id) = rx.recv().await {
+        loop {
+            let job_id = state.queue.pop().await;
             if let Err(error) = process_job(state.clone(), job_id).await {
                 error!(job_id = %job_id, error = %error, "conversion job failed unexpectedly");
                 state.jobs.mark_failed(job_id, format!("{error:#}"));
@@ -280,8 +341,8 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_state, move_to_archive, sanitize_filename, should_ignore_input_path, start_worker,
-        unique_path_for_filename,
+        JobQueue, QueuePriority, build_state, move_to_archive, sanitize_filename,
+        should_ignore_input_path, start_worker, unique_path_for_filename,
     };
     use crate::{config::Config, jobs::JobStatus};
     use std::{net::SocketAddr, path::Path};
@@ -301,6 +362,25 @@ mod tests {
         assert!(should_ignore_input_path(Path::new("file.uploading")));
         assert!(should_ignore_input_path(Path::new(".DS_Store")));
         assert!(!should_ignore_input_path(Path::new("real.txt")));
+    }
+
+    #[tokio::test]
+    async fn priority_queue_pops_high_priority_before_normal_priority() {
+        let queue = JobQueue::default();
+        let normal_one = uuid::Uuid::new_v4();
+        let normal_two = uuid::Uuid::new_v4();
+        let high_one = uuid::Uuid::new_v4();
+        let high_two = uuid::Uuid::new_v4();
+
+        queue.push(normal_one, QueuePriority::Normal);
+        queue.push(normal_two, QueuePriority::Normal);
+        queue.push(high_one, QueuePriority::High);
+        queue.push(high_two, QueuePriority::High);
+
+        assert_eq!(queue.pop().await, high_one);
+        assert_eq!(queue.pop().await, high_two);
+        assert_eq!(queue.pop().await, normal_one);
+        assert_eq!(queue.pop().await, normal_two);
     }
 
     #[tokio::test]
@@ -349,8 +429,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (state, rx) = build_state(config);
-        let worker = start_worker(state.clone(), rx);
+        let state = build_state(config);
+        let worker = start_worker(state.clone());
         let job = state.enqueue_path(&input_path).unwrap();
 
         let mut final_job = None;
