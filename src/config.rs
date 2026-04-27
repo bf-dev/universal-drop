@@ -11,11 +11,13 @@ pub struct Config {
     pub input_dir: PathBuf,
     pub results_dir: PathBuf,
     pub archive_dir: PathBuf,
+    pub failed_dir: PathBuf,
     pub bind_addr: SocketAddr,
     pub ollama_base_url: String,
     pub ollama_model: String,
     pub ollama_keep_alive: String,
     pub ollama_num_thread: usize,
+    pub ollama_timeout_seconds: usize,
     pub gemini_ocr_enabled: bool,
     pub gemini_api_key: Option<String>,
     pub gemini_api_key_header: String,
@@ -47,6 +49,8 @@ pub struct Config {
     pub video_max_frames: usize,
     pub video_scene_threshold: f32,
     pub max_csv_rows: usize,
+    pub max_job_attempts: usize,
+    pub job_retry_backoff: Duration,
     pub file_stability_checks: usize,
     pub file_stability_delay: Duration,
 }
@@ -72,6 +76,10 @@ impl Config {
         if !(0.0..=1.0).contains(&video_scene_threshold) {
             bail!("VIDEO_SCENE_THRESHOLD must be between 0.0 and 1.0");
         }
+        let max_job_attempts = parse_env_usize("MAX_JOB_ATTEMPTS", 1)?;
+        if max_job_attempts == 0 {
+            bail!("MAX_JOB_ATTEMPTS must be at least 1");
+        }
 
         let pdf_orient_ocr_min_confidence = parse_env_f32("PDF_ORIENT_OCR_MIN_CONFIDENCE", 0.60)?;
         if !(0.0..=1.0).contains(&pdf_orient_ocr_min_confidence) {
@@ -86,12 +94,14 @@ impl Config {
             input_dir: env_path("INPUT_DIR", "/data/input"),
             results_dir: env_path("RESULTS_DIR", "/data/results"),
             archive_dir: env_path("ARCHIVE_DIR", "/data/archive"),
+            failed_dir: env_path("FAILED_DIR", "/data/failed"),
             bind_addr,
             ollama_base_url: env::var("OLLAMA_BASE_URL")
                 .unwrap_or_else(|_| "http://ollama:11434".to_string()),
             ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "glm-ocr".to_string()),
             ollama_keep_alive: env::var("OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "30m".to_string()),
             ollama_num_thread: parse_env_usize("OLLAMA_NUM_THREAD", 8)?,
+            ollama_timeout_seconds: parse_env_usize("OLLAMA_TIMEOUT_SECONDS", 600)?,
             gemini_ocr_enabled: parse_env_bool("GEMINI_OCR_ENABLED", true)?,
             gemini_api_key: env_nonempty("GEMINI_API_KEY")
                 .or_else(|| env_nonempty("HKU_GEMINI_API_KEY")),
@@ -137,6 +147,10 @@ impl Config {
             video_max_frames,
             video_scene_threshold,
             max_csv_rows: parse_env_usize("MAX_CSV_ROWS", 1_000)?,
+            max_job_attempts,
+            job_retry_backoff: Duration::from_secs(
+                parse_env_usize("JOB_RETRY_BACKOFF_SECONDS", 30)? as u64,
+            ),
             file_stability_checks: parse_env_usize("FILE_STABILITY_CHECKS", 3)?,
             file_stability_delay: Duration::from_millis(parse_env_usize(
                 "FILE_STABILITY_DELAY_MS",
@@ -159,6 +173,9 @@ impl Config {
                 "failed to create archive dir {}",
                 self.archive_dir.display()
             )
+        })?;
+        std::fs::create_dir_all(&self.failed_dir).with_context(|| {
+            format!("failed to create failed dir {}", self.failed_dir.display())
         })?;
         Ok(())
     }
@@ -234,11 +251,13 @@ mod tests {
             input_dir: PathBuf::from("/tmp/input"),
             results_dir: PathBuf::from("/tmp/results"),
             archive_dir: PathBuf::from("/tmp/archive"),
+            failed_dir: PathBuf::from("/tmp/failed"),
             bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "glm-ocr".to_string(),
             ollama_keep_alive: "30m".to_string(),
             ollama_num_thread: 8,
+            ollama_timeout_seconds: 600,
             gemini_ocr_enabled: true,
             gemini_api_key: None,
             gemini_api_key_header: "api-key".to_string(),
@@ -271,6 +290,8 @@ mod tests {
             video_max_frames: 24,
             video_scene_threshold: 0.35,
             max_csv_rows: 1_000,
+            max_job_attempts: 1,
+            job_retry_backoff: Duration::from_millis(1),
             file_stability_checks: 1,
             file_stability_delay: Duration::from_millis(1),
         }

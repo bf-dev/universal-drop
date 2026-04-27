@@ -8,7 +8,7 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 - Processes one job at a time to keep memory usage predictable.
 - Writes Markdown results to `RESULTS_DIR/<original-name>.md`.
 - Moves successfully converted originals to `ARCHIVE_DIR`.
-- Leaves failed inputs in place and exposes the error through `/jobs/{id}`.
+- Moves terminally failed originals to `FAILED_DIR` after `MAX_JOB_ATTEMPTS`, so one bad file cannot keep re-entering the watched queue forever.
 - Accepts plain text through `/text` and auto-detects HTTP(S) URLs in `.txt` drops.
 - OCRs PDF pages and standalone image files with the HKU Vertex AI Gemini endpoint first, using `gemini-3-flash-preview` by default, then falls back to local Ollama `glm-ocr` if Gemini is unavailable, rate-limited, or not configured.
 - Auto-detects and corrects whole-page PDF render orientation with native OpenCV before OCR, rotating only by 90/180/270 degrees when confidence is high enough. It never performs small-angle deskew rotations.
@@ -58,15 +58,16 @@ Place a whisper.cpp-compatible multilingual large-v3 model at:
 ~/Documents/universal-drop-models/whisper/ggml-large-v3.bin
 ```
 
-Then drop files into `~/Documents/universal-drop-input` or upload through the API. Successful Markdown output appears in `~/Documents/universal-drop-outputs`; originals move to `~/Documents/universal-drop-archive`.
+Then drop files into `~/Documents/universal-drop-input` or upload through the API. Successful Markdown output appears in `~/Documents/universal-drop-outputs`; successful originals move to `~/Documents/universal-drop-archive`; terminal failures move to `~/Documents/universal-drop-failed`.
 
-The three mounted data folders are configurable through Compose variables:
+The mounted data folders are configurable through Compose variables:
 
 | Compose variable | Default host directory | Container path |
 | --- | --- | --- |
 | `DROP_INPUT_DIR` | `/home/bfdev/Documents/universal-drop-input` | `/data/input` |
 | `DROP_RESULTS_DIR` | `/home/bfdev/Documents/universal-drop-outputs` | `/data/results` |
 | `DROP_ARCHIVE_DIR` | `/home/bfdev/Documents/universal-drop-archive` | `/data/archive` |
+| `DROP_FAILED_DIR` | `/home/bfdev/Documents/universal-drop-failed` | `/data/failed` |
 
 `WHISPER_MODELS_DIR` defaults to `/home/bfdev/Documents/universal-drop-models/whisper` for the optional Whisper model mount.
 
@@ -134,10 +135,12 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `INPUT_DIR` | `/data/input` | Watched/drop folder. |
 | `RESULTS_DIR` | `/data/results` | Markdown output folder. |
 | `ARCHIVE_DIR` | `/data/archive` | Successful-original archive. |
+| `FAILED_DIR` | `/data/failed` | Terminal-failure dead-letter folder. |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Local Ollama API base URL. The app currently targets local HTTP Ollama. |
 | `OLLAMA_MODEL` | `glm-ocr` | Multimodal OCR model. |
 | `OLLAMA_KEEP_ALIVE` | `30m` | Sent in PDF/video OCR requests and mirrored in compose for Ollama to reduce model reloads. |
 | `OLLAMA_NUM_THREAD` | `8` | Per-request Ollama CPU thread count for OCR/frame analysis. |
+| `OLLAMA_TIMEOUT_SECONDS` | `600` | Per-request Ollama HTTP timeout so a hung local model call cannot hold the queue forever. |
 | `GEMINI_OCR_ENABLED` | `true` | Try Gemini first for PDF page OCR and standalone image OCR when an API key is configured. Set to `false` to force local Ollama OCR. |
 | `GEMINI_API_KEY` | unset | HKU/Azure API Management subscription key for Gemini. Keep this in local `.env` or the shell only; never commit it. `HKU_GEMINI_API_KEY` is also accepted as a fallback variable name. |
 | `GEMINI_API_KEY_HEADER` | `api-key` | Header used for the HKU API Management subscription key. |
@@ -169,6 +172,8 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `VIDEO_MAX_FRAMES` | `24` | Hard cap on selected visual frames to prevent oversized output and overload. |
 | `VIDEO_SCENE_THRESHOLD` | `0.35` | FFmpeg scene-change threshold from `0.0` to `1.0`; lower values select more frames. |
 | `MAX_CSV_ROWS` | `1000` | CSV/TSV Markdown row cap. |
+| `MAX_JOB_ATTEMPTS` | `1` | Attempts per queued file before terminal failure. Raise this only for transient infrastructure issues. |
+| `JOB_RETRY_BACKOFF_SECONDS` | `30` | Delay between attempts when `MAX_JOB_ATTEMPTS` is above 1. |
 | `FILE_STABILITY_CHECKS` | `3` | Number of stable metadata checks before processing a dropped file. |
 | `FILE_STABILITY_DELAY_MS` | `500` | Delay between file-stability checks. |
 

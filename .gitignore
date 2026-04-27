@@ -11,6 +11,7 @@ DEPLOYMENT.md
 /input/
 /results/
 /archive/
+/failed/
 /models/
 /tmp/
 

@@ -12,7 +12,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::{fs, sync::Notify, task::JoinHandle, time::sleep};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -163,45 +163,94 @@ pub async fn scan_input_dir(state: &AppState) -> Result<Vec<Job>> {
 }
 
 async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
-    state.jobs.mark_running(job_id);
     let job = state
         .jobs
         .get(job_id)
         .ok_or_else(|| anyhow::anyhow!("job {job_id} disappeared before processing"))?;
-    info!(job_id = %job_id, path = %job.input_path.display(), "starting conversion job");
 
-    let result = async {
-        wait_for_file_ready(&job.input_path, &state.config).await?;
-        let markdown = convert_to_markdown(&job.input_path, &state.config, &state.client).await?;
-        if let Some(parent) = job.result_path.parent() {
-            fs::create_dir_all(parent).await.with_context(|| {
-                format!("failed to create results directory {}", parent.display())
-            })?;
+    for attempt in 1..=state.config.max_job_attempts {
+        state.jobs.mark_running_attempt(job_id, attempt);
+        info!(
+            job_id = %job_id,
+            path = %job.input_path.display(),
+            attempt,
+            max_attempts = state.config.max_job_attempts,
+            "starting conversion job"
+        );
+
+        match run_conversion_once(&state, &job).await {
+            Ok(archive_path) => {
+                state.jobs.mark_succeeded(job_id, archive_path.clone());
+                info!(
+                    job_id = %job_id,
+                    result = %job.result_path.display(),
+                    archive = %archive_path.display(),
+                    "conversion job succeeded"
+                );
+                return Ok(());
+            }
+            Err(error) if attempt < state.config.max_job_attempts => {
+                warn!(
+                    job_id = %job_id,
+                    attempt,
+                    max_attempts = state.config.max_job_attempts,
+                    error = %error,
+                    "conversion job attempt failed; retrying"
+                );
+                sleep(state.config.job_retry_backoff).await;
+            }
+            Err(error) => {
+                let mut error_text = format!("{error:#}");
+                let failed_path =
+                    match move_to_failed(&job.input_path, &state.config.failed_dir).await {
+                        Ok(path) => Some(path),
+                        Err(move_error) => {
+                            error!(
+                                job_id = %job_id,
+                                path = %job.input_path.display(),
+                                error = %move_error,
+                                "failed to move failed input out of watched folder"
+                            );
+                            error_text.push_str(&format!(
+                                "\nAlso failed to move source to failed dir: {move_error:#}"
+                            ));
+                            None
+                        }
+                    };
+                state
+                    .jobs
+                    .mark_failed_with_path(job_id, error_text, failed_path.clone());
+                let failed_path_display = failed_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<not moved>".to_string());
+                error!(
+                    job_id = %job_id,
+                    attempt,
+                    max_attempts = state.config.max_job_attempts,
+                    failed_path = %failed_path_display,
+                    "conversion job failed after max attempts"
+                );
+                return Ok(());
+            }
         }
-        fs::write(&job.result_path, markdown)
+    }
+
+    Ok(())
+}
+
+async fn run_conversion_once(state: &AppState, job: &Job) -> Result<PathBuf> {
+    wait_for_file_ready(&job.input_path, &state.config).await?;
+    let markdown = convert_to_markdown(&job.input_path, &state.config, &state.client).await?;
+    if let Some(parent) = job.result_path.parent() {
+        fs::create_dir_all(parent)
             .await
-            .with_context(|| format!("failed to write result {}", job.result_path.display()))?;
-        let archive_path = move_to_archive(&job.input_path, &state.config.archive_dir).await?;
-        Result::<PathBuf>::Ok(archive_path)
+            .with_context(|| format!("failed to create results directory {}", parent.display()))?;
     }
-    .await;
-
-    match result {
-        Ok(archive_path) => {
-            state.jobs.mark_succeeded(job_id, archive_path.clone());
-            info!(
-                job_id = %job_id,
-                result = %job.result_path.display(),
-                archive = %archive_path.display(),
-                "conversion job succeeded"
-            );
-            Ok(())
-        }
-        Err(error) => {
-            state.jobs.mark_failed(job_id, format!("{error:#}"));
-            Err(error)
-        }
-    }
+    fs::write(&job.result_path, markdown)
+        .await
+        .with_context(|| format!("failed to write result {}", job.result_path.display()))?;
+    move_to_archive(&job.input_path, &state.config.archive_dir).await
 }
 
 pub async fn wait_for_file_ready(path: &Path, config: &Config) -> Result<()> {
@@ -240,16 +289,24 @@ pub async fn wait_for_file_ready(path: &Path, config: &Config) -> Result<()> {
 }
 
 pub async fn move_to_archive(source: &Path, archive_dir: &Path) -> Result<PathBuf> {
-    fs::create_dir_all(archive_dir)
+    move_input_to_dir(source, archive_dir, "archive").await
+}
+
+pub async fn move_to_failed(source: &Path, failed_dir: &Path) -> Result<PathBuf> {
+    move_input_to_dir(source, failed_dir, "failed").await
+}
+
+async fn move_input_to_dir(source: &Path, target_dir: &Path, label: &str) -> Result<PathBuf> {
+    fs::create_dir_all(target_dir)
         .await
-        .with_context(|| format!("failed to create archive dir {}", archive_dir.display()))?;
+        .with_context(|| format!("failed to create {label} dir {}", target_dir.display()))?;
     let file_name = source
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             anyhow::anyhow!("source path has no valid file name: {}", source.display())
         })?;
-    let target = unique_path_for_filename(archive_dir, file_name).await?;
+    let target = unique_path_for_filename(target_dir, file_name).await?;
 
     match fs::rename(source, &target).await {
         Ok(()) => Ok(target),
@@ -261,9 +318,9 @@ pub async fn move_to_archive(source: &Path, archive_dir: &Path) -> Result<PathBu
                     target.display()
                 )
             })?;
-            fs::remove_file(source).await.with_context(|| {
-                format!("failed to remove archived source {}", source.display())
-            })?;
+            fs::remove_file(source)
+                .await
+                .with_context(|| format!("failed to remove {label} source {}", source.display()))?;
             Ok(target)
         }
     }
@@ -458,16 +515,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn worker_moves_failed_input_out_of_watched_folder() {
+        let temp = tempdir().unwrap();
+        let config = test_config(temp.path());
+        config.ensure_dirs().unwrap();
+        let input_path = config.input_dir.join("bad.bin");
+        fs::write(&input_path, b"not supported").await.unwrap();
+
+        let state = build_state(config);
+        let worker = start_worker(state.clone());
+        let job = state.enqueue_path(&input_path).unwrap();
+
+        let mut final_job = None;
+        for _ in 0..50 {
+            let current = state.jobs.get(job.id).unwrap();
+            if matches!(current.status, JobStatus::Succeeded | JobStatus::Failed) {
+                final_job = Some(current);
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        worker.abort();
+
+        let finished = final_job.expect("job did not finish in time");
+        assert_eq!(finished.status, JobStatus::Failed);
+        assert_eq!(finished.attempts, 1);
+        assert!(!fs::try_exists(&input_path).await.unwrap());
+        assert!(fs::try_exists(finished.failed_path.unwrap()).await.unwrap());
+    }
+
     fn test_config(root: &Path) -> Config {
         Config {
             input_dir: root.join("input"),
             results_dir: root.join("results"),
             archive_dir: root.join("archive"),
+            failed_dir: root.join("failed"),
             bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "glm-ocr".to_string(),
             ollama_keep_alive: "30m".to_string(),
             ollama_num_thread: 8,
+            ollama_timeout_seconds: 600,
             gemini_ocr_enabled: true,
             gemini_api_key: None,
             gemini_api_key_header: "api-key".to_string(),
@@ -500,6 +589,8 @@ mod tests {
             video_max_frames: 24,
             video_scene_threshold: 0.35,
             max_csv_rows: 1_000,
+            max_job_attempts: 1,
+            job_retry_backoff: Duration::from_millis(1),
             file_stability_checks: 1,
             file_stability_delay: Duration::from_millis(1),
         }

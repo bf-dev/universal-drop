@@ -23,8 +23,10 @@ pub struct Job {
     pub input_path: PathBuf,
     pub result_path: PathBuf,
     pub archive_path: Option<PathBuf>,
+    pub failed_path: Option<PathBuf>,
     pub status: JobStatus,
     pub error: Option<String>,
+    pub attempts: usize,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -66,8 +68,10 @@ impl JobStore {
             input_path: input_path.clone(),
             result_path,
             archive_path: None,
+            failed_path: None,
             status: JobStatus::Queued,
             error: None,
+            attempts: 0,
             created_at: now,
             updated_at: now,
         };
@@ -97,16 +101,31 @@ impl JobStore {
     }
 
     pub fn mark_running(&self, id: Uuid) {
+        self.mark_running_attempt(id, 1);
+    }
+
+    pub fn mark_running_attempt(&self, id: Uuid, attempt: usize) {
         self.update(id, |job| {
             job.status = JobStatus::Running;
             job.error = None;
+            job.attempts = attempt;
         });
     }
 
     pub fn mark_failed(&self, id: Uuid, error: impl Into<String>) {
+        self.mark_failed_with_path(id, error, None);
+    }
+
+    pub fn mark_failed_with_path(
+        &self,
+        id: Uuid,
+        error: impl Into<String>,
+        failed_path: Option<PathBuf>,
+    ) {
         self.finish(id, |job| {
             job.status = JobStatus::Failed;
             job.error = Some(error.into());
+            job.failed_path = failed_path;
         });
     }
 
@@ -114,6 +133,7 @@ impl JobStore {
         self.finish(id, |job| {
             job.status = JobStatus::Succeeded;
             job.archive_path = Some(archive_path);
+            job.failed_path = None;
             job.error = None;
         });
     }

@@ -466,8 +466,11 @@ async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Resul
     let mut output = format!("# OCR: {title}\n\n");
     let mut gemini_disabled_for_job = false;
     let mut last_gemini_attempt = None;
+    let mut succeeded_pages = 0usize;
+    let mut failed_pages = 0usize;
     for (index, page_path) in pages.iter().enumerate() {
-        let page_markdown = ocr_document_image_to_markdown(
+        output.push_str(&format!("## Page {}\n\n", index + 1));
+        match ocr_document_image_to_markdown(
             page_path,
             config,
             client,
@@ -475,10 +478,33 @@ async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Resul
             &mut last_gemini_attempt,
         )
         .await
-        .with_context(|| format!("OCR failed for page {}", index + 1))?;
-        output.push_str(&format!("## Page {}\n\n", index + 1));
-        output.push_str(page_markdown.trim());
+        {
+            Ok(page_markdown) => {
+                succeeded_pages += 1;
+                output.push_str(page_markdown.trim());
+            }
+            Err(error) => {
+                failed_pages += 1;
+                warn!(
+                    path = %path.display(),
+                    page = index + 1,
+                    error = %error,
+                    "PDF page OCR failed; keeping partial output"
+                );
+                output.push_str(&format!("_OCR failed for this page: {error:#}_"));
+            }
+        }
         output.push_str("\n\n");
+    }
+    if succeeded_pages == 0 {
+        bail!("OCR failed for every page in {}", path.display());
+    }
+    if failed_pages > 0 {
+        output.push_str("## Conversion warnings\n\n");
+        output.push_str(&format!(
+            "- OCR failed for {failed_pages} of {} rendered pages; the rest of the document was preserved.\n\n",
+            pages.len()
+        ));
     }
     Ok(output)
 }
@@ -1193,6 +1219,7 @@ async fn generate_with_ollama_images(
     );
     let response = client
         .post(url)
+        .timeout(Duration::from_secs(config.ollama_timeout_seconds as u64))
         .json(&request)
         .send()
         .await
@@ -1405,16 +1432,33 @@ async fn video_to_markdown(path: &Path, config: &Config, client: &Client) -> Res
     }
 
     output.push_str("## Visual key frames\n\n");
+    let mut failed_frames = 0usize;
     for (index, frame) in frames.iter().enumerate() {
         let previous = index
             .checked_sub(1)
             .and_then(|previous_index| frames.get(previous_index));
-        let analysis = analyze_video_frame(frame, previous, index, frames.len(), config, client)
-            .await
-            .with_context(|| format!("Ollama frame analysis failed for frame {}", index + 1))?;
         output.push_str(&format!("### Frame {} — {}\n\n", index + 1, frame.label));
-        output.push_str(analysis.trim());
+        match analyze_video_frame(frame, previous, index, frames.len(), config, client).await {
+            Ok(analysis) => output.push_str(analysis.trim()),
+            Err(error) => {
+                failed_frames += 1;
+                warn!(
+                    path = %path.display(),
+                    frame = index + 1,
+                    error = %error,
+                    "video frame analysis failed; keeping partial output"
+                );
+                output.push_str(&format!("_Frame analysis failed: {error:#}_"));
+            }
+        }
         output.push_str("\n\n");
+    }
+    if failed_frames > 0 {
+        output.push_str("## Conversion warnings\n\n");
+        output.push_str(&format!(
+            "- Visual analysis failed for {failed_frames} of {} selected frames; the transcript and other frame notes were preserved.\n\n",
+            frames.len()
+        ));
     }
 
     Ok(output)
@@ -1760,11 +1804,13 @@ mod tests {
             input_dir: PathBuf::from("/tmp/input"),
             results_dir: PathBuf::from("/tmp/results"),
             archive_dir: PathBuf::from("/tmp/archive"),
+            failed_dir: PathBuf::from("/tmp/failed"),
             bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "glm-ocr".to_string(),
             ollama_keep_alive: "30m".to_string(),
             ollama_num_thread: 8,
+            ollama_timeout_seconds: 600,
             gemini_ocr_enabled: true,
             gemini_api_key: None,
             gemini_api_key_header: "api-key".to_string(),
@@ -1797,6 +1843,8 @@ mod tests {
             video_max_frames: 24,
             video_scene_threshold: 0.35,
             max_csv_rows: 1_000,
+            max_job_attempts: 1,
+            job_retry_backoff: Duration::from_millis(1),
             file_stability_checks: 1,
             file_stability_delay: Duration::from_millis(1),
         }

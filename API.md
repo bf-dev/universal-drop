@@ -8,15 +8,16 @@ http://localhost:9360
 
 `docker-compose.yml` maps host port `${APP_PORT:-9360}` to container port `8080`, so set `APP_PORT` before starting Compose if you want a different host port.
 
-Current Docker defaults mount three host data directories:
+Current Docker defaults mount these host data directories:
 
 | Purpose | Host directory | Container directory |
 | --- | --- | --- |
 | Input/drop folder | `/home/bfdev/Documents/universal-drop-input` | `/data/input` |
 | Markdown results | `/home/bfdev/Documents/universal-drop-outputs` | `/data/results` |
 | Successful-original archive | `/home/bfdev/Documents/universal-drop-archive` | `/data/archive` |
+| Terminal-failure dead letter | `/home/bfdev/Documents/universal-drop-failed` | `/data/failed` |
 
-Override them with `DROP_INPUT_DIR`, `DROP_RESULTS_DIR`, and `DROP_ARCHIVE_DIR` when starting Docker Compose.
+Override them with `DROP_INPUT_DIR`, `DROP_RESULTS_DIR`, `DROP_ARCHIVE_DIR`, and `DROP_FAILED_DIR` when starting Docker Compose.
 
 ## Health
 
@@ -60,8 +61,10 @@ Successful response: `201 Created`
       "input_path": "/data/input/example.pdf",
       "result_path": "/data/results/example.pdf.md",
       "archive_path": null,
+      "failed_path": null,
       "status": "queued",
       "error": null,
+      "attempts": 0,
       "created_at": "2026-04-18T00:00:00Z",
       "updated_at": "2026-04-18T00:00:00Z"
     }
@@ -86,8 +89,10 @@ Successful response: `200 OK`
       "input_path": "/data/input/notes.txt",
       "result_path": "/data/results/notes.txt.md",
       "archive_path": "/data/archive/notes.txt",
+      "failed_path": null,
       "status": "succeeded",
       "error": null,
+      "attempts": 1,
       "created_at": "2026-04-18T00:00:00Z",
       "updated_at": "2026-04-18T00:00:01Z"
     }
@@ -146,7 +151,7 @@ You can skip the upload endpoint and drop files directly into the input volume:
 cp ./example.pdf ~/Documents/universal-drop-input/
 ```
 
-The service watches the input directory, converts the file, writes Markdown to `~/Documents/universal-drop-outputs/<original-name>.md`, and moves the original into `~/Documents/universal-drop-archive/` after success.
+The service watches the input directory, converts the file, writes Markdown to `~/Documents/universal-drop-outputs/<original-name>.md`, and moves the original into `~/Documents/universal-drop-archive/` after success. After `MAX_JOB_ATTEMPTS` failed attempts, it moves the original into `~/Documents/universal-drop-failed/` so the watched input folder cannot keep re-queuing the same bad file.
 
 ## Conversion notes
 
@@ -155,8 +160,9 @@ The service watches the input directory, converts the file, writes Markdown to `
 - Standalone image files (`.jpg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`, `.heic`, etc.) are also OCRed into Markdown with Gemini first and local Ollama `glm-ocr` fallback.
 - Set `GEMINI_API_KEY` to enable Gemini OCR. The default endpoint template is `https://api.hku.hk/gemini/student/{deployment-id}:generateContent`, and the default subscription-key header is `api-key`. Gemini calls are paced by `GEMINI_MIN_INTERVAL_SECONDS` (default `21`) to respect the student API rate limit.
 - Ollama OCR/frame-analysis requests include `keep_alive` and `num_thread` settings from `OLLAMA_KEEP_ALIVE` and `OLLAMA_NUM_THREAD`.
+- Ollama OCR/frame-analysis requests are bounded by `OLLAMA_TIMEOUT_SECONDS` (default `600`).
 - Audio files are normalized with `ffmpeg` and transcribed by launching `whisper.cpp` only for that job. Consecutive duplicate Whisper lines are collapsed before Markdown output. Whisper defaults are tuned for speed: 8 threads, beam size 1, best-of 1, and no fallback retries.
-- Video files are converted locally by extracting audio for Whisper large-v3 and selecting a bounded set of significant visual frames with FFmpeg scene-change detection. The service analyzes the first selected frame and compares later selected frames to the previous selected frame through local Ollama, instead of describing every frame.
+- Video files are converted locally by extracting audio for Whisper large-v3 and selecting a bounded set of significant visual frames with FFmpeg scene-change detection. The service analyzes the first selected frame and compares later selected frames to the previous selected frame through local Ollama, instead of describing every frame. If a selected frame fails analysis, the job keeps the transcript and other frame notes instead of failing the whole video.
 - Video frame controls are `VIDEO_MIN_FRAMES`, `VIDEO_MAX_FRAMES`, and `VIDEO_SCENE_THRESHOLD`.
 - CSV/TSV output is capped by `MAX_CSV_ROWS`.
-- Failed conversions leave the source file in the input directory and put the failure message in the job's `error` field.
+- Terminal failed conversions move the source file to the failed/dead-letter directory and put the failure message in the job's `error` field.
