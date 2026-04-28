@@ -113,6 +113,42 @@ pub fn normalize_markdown(input: &str) -> String {
     output
 }
 
+pub fn strip_response_markdown_fence(input: &str) -> String {
+    let mut current = input.trim().to_string();
+    loop {
+        let lines = current.lines().collect::<Vec<_>>();
+        if lines.len() < 2 {
+            return current;
+        }
+        let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
+            return current;
+        };
+        if !is_response_fence_start(first) || !is_fence_end(last) {
+            return current;
+        }
+        let next = lines[1..lines.len() - 1].join("\n").trim().to_string();
+        if next == current {
+            return current;
+        }
+        current = next;
+    }
+}
+
+fn is_response_fence_start(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(label) = trimmed.strip_prefix("```") else {
+        return false;
+    };
+    matches!(
+        label.trim().to_ascii_lowercase().as_str(),
+        "" | "md" | "markdown" | "mdown" | "text" | "txt" | "plain" | "plaintext"
+    )
+}
+
+fn is_fence_end(line: &str) -> bool {
+    line.trim() == "```"
+}
+
 pub async fn read_text_markdown(path: &Path) -> Result<String> {
     let bytes = fs::read(path)
         .await
@@ -883,7 +919,8 @@ Requirements:
 - Preserve tables as GitHub-flavored Markdown tables when practical; otherwise use line-preserving Markdown.
 - Preserve headings, lists, checkboxes, form labels, signatures, stamps, captions, and footnotes.
 - Keep natural reading order for the page layout.
-- Do not add commentary, confidence notes, source URLs, or invented content.";
+- Do not add commentary, confidence notes, source URLs, or invented content.
+- Do not wrap the response in a Markdown code fence such as ```text, ```md, or ```markdown.";
 
 #[derive(Debug, Serialize)]
 struct GeminiGenerateRequest<'a> {
@@ -994,7 +1031,7 @@ async fn ocr_document_image_to_markdown(
     if !*gemini_disabled_for_job && gemini_is_configured(config) {
         wait_for_gemini_rate_limit(config, last_gemini_attempt).await;
         match ocr_document_image_with_gemini(path, config, client).await {
-            Ok(markdown) => return Ok(markdown),
+            Ok(markdown) => return Ok(strip_response_markdown_fence(&markdown)),
             Err(error) => {
                 *gemini_disabled_for_job = true;
                 warn!(
@@ -1006,7 +1043,9 @@ async fn ocr_document_image_to_markdown(
         }
     }
 
-    ocr_document_image_with_local_glm(path, config, client).await
+    ocr_document_image_with_local_glm(path, config, client)
+        .await
+        .map(|markdown| strip_response_markdown_fence(&markdown))
 }
 
 fn gemini_is_configured(config: &Config) -> bool {
@@ -1796,6 +1835,7 @@ mod tests {
         ConversionRoute, collapse_consecutive_repeated_transcript_lines, csv_bytes_to_markdown,
         detect_route, extract_urls, fallback_frame_timestamps, gemini_generate_content_url,
         normalize_markdown, orientation_ocr_text_score, should_autodetect_urls,
+        strip_response_markdown_fence,
     };
     use std::{net::SocketAddr, path::Path, path::PathBuf, time::Duration};
 
@@ -1884,6 +1924,28 @@ mod tests {
     #[test]
     fn normalizes_line_endings_and_trailing_spaces() {
         assert_eq!(normalize_markdown("a  \r\nb\r\n"), "a\nb\n");
+    }
+
+    #[test]
+    fn strips_common_response_markdown_fences() {
+        assert_eq!(
+            strip_response_markdown_fence("```markdown\n# Title\n\nBody\n```"),
+            "# Title\n\nBody"
+        );
+        assert_eq!(
+            strip_response_markdown_fence("  ```text  \nplain OCR text\n```  "),
+            "plain OCR text"
+        );
+        assert_eq!(
+            strip_response_markdown_fence("```md\n```markdown\n# Nested\n```\n```"),
+            "# Nested"
+        );
+    }
+
+    #[test]
+    fn keeps_programming_language_fences() {
+        let fenced = "```python\nprint('visible source code')\n```";
+        assert_eq!(strip_response_markdown_fence(fenced), fenced);
     }
 
     #[test]
