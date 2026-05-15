@@ -14,7 +14,7 @@ RUN cmake -B build \
       -DWHISPER_BUILD_TESTS=OFF \
       -DWHISPER_BUILD_EXAMPLES=ON \
       -DBUILD_SHARED_LIBS=OFF \
-      -DGGML_NATIVE=ON \
+      -DGGML_NATIVE=OFF \
       -DGGML_BLAS=1 \
       -DGGML_BLAS_VENDOR=OpenBLAS \
     && cmake --build build --config Release -j"$(nproc)" \

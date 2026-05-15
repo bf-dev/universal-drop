@@ -9,8 +9,8 @@ services:
       RESULTS_DIR: /data/results
       ARCHIVE_DIR: /data/archive
       FAILED_DIR: /data/failed
-      OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: glm-ocr
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-ocr}
       OLLAMA_KEEP_ALIVE: 30m
       OLLAMA_NUM_THREAD: 8
       OLLAMA_TIMEOUT_SECONDS: "${OLLAMA_TIMEOUT_SECONDS:-600}"
@@ -48,11 +48,11 @@ services:
       JOB_RETRY_BACKOFF_SECONDS: "${JOB_RETRY_BACKOFF_SECONDS:-30}"
       RUST_LOG: info
     volumes:
-      - ${DROP_INPUT_DIR:-/home/bfdev/Documents/universal-drop-input}:/data/input
-      - ${DROP_RESULTS_DIR:-/home/bfdev/Documents/universal-drop-outputs}:/data/results
-      - ${DROP_ARCHIVE_DIR:-/home/bfdev/Documents/universal-drop-archive}:/data/archive
-      - ${DROP_FAILED_DIR:-/home/bfdev/Documents/universal-drop-failed}:/data/failed
-      - ${WHISPER_MODELS_DIR:-/home/bfdev/Documents/universal-drop-models/whisper}:/models/whisper:ro
+      - ${DROP_INPUT_DIR:-/Users/bfdev/Documents/universal-drop-input}:/data/input
+      - ${DROP_RESULTS_DIR:-/Users/bfdev/Documents/universal-drop-outputs}:/data/results
+      - ${DROP_ARCHIVE_DIR:-/Users/bfdev/Documents/universal-drop-archive}:/data/archive
+      - ${DROP_FAILED_DIR:-/Users/bfdev/Documents/universal-drop-failed}:/data/failed
+      - ${WHISPER_MODELS_DIR:-/Users/bfdev/Documents/universal-drop-models/whisper}:/models/whisper:ro
     depends_on:
       - ollama
     restart: unless-stopped
@@ -65,13 +65,8 @@ services:
       OLLAMA_KEEP_ALIVE: 30m
       OLLAMA_NUM_PARALLEL: 1
       OLLAMA_FLASH_ATTENTION: 1
-      OLLAMA_VULKAN: 1
+      OLLAMA_VULKAN: 0
       OLLAMA_LLM_LIBRARY: ${OLLAMA_LLM_LIBRARY:-}
-      GGML_VK_VISIBLE_DEVICES: 0
-    devices:
-      - /dev/dri:/dev/dri
-    security_opt:
-      - label=disable
     volumes:
       - ollama-data:/root/.ollama
     restart: unless-stopped
