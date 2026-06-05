@@ -12,10 +12,10 @@ Current Docker defaults mount these host data directories:
 
 | Purpose | Host directory | Container directory |
 | --- | --- | --- |
-| Input/drop folder | `/home/bfdev/Documents/universal-drop-input` | `/data/input` |
-| Markdown results | `/home/bfdev/Documents/universal-drop-outputs` | `/data/results` |
-| Successful-original archive | `/home/bfdev/Documents/universal-drop-archive` | `/data/archive` |
-| Terminal-failure dead letter | `/home/bfdev/Documents/universal-drop-failed` | `/data/failed` |
+| Input/drop folder | `/Users/bfdev/Documents/universal-drop-input` | `/data/input` |
+| Markdown results | `/Users/bfdev/Documents/universal-drop-outputs` | `/data/results` |
+| Successful-original archive | `/Users/bfdev/Documents/universal-drop-archive` | `/data/archive` |
+| Terminal-failure dead letter | `/Users/bfdev/Documents/universal-drop-failed` | `/data/failed` |
 
 Override them with `DROP_INPUT_DIR`, `DROP_RESULTS_DIR`, `DROP_ARCHIVE_DIR`, and `DROP_FAILED_DIR` when starting Docker Compose.
 
