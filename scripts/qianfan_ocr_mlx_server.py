@@ -141,13 +141,14 @@ class Handler(BaseHTTPRequestHandler):
                     _error(self, HTTPStatus.BAD_REQUEST, "at least one image is required")
                     return
                 formatted_prompt = apply_chat_template(_PROCESSOR, _CONFIG, prompt, num_images=len(images))
-                output = generate(
+                raw_output = generate(
                     _MODEL,
                     _PROCESSOR,
                     formatted_prompt,
                     images,
                     max_tokens=max_tokens,
                 )
+                output = getattr(raw_output, "text", None) or getattr(raw_output, "content", None) or str(raw_output)
             created = int(time.time())
             _json_response(
                 self,
