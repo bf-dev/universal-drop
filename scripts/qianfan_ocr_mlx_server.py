@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Small OpenAI-compatible Qianfan OCR server for Apple Silicon MLX.
 
-The shell launcher converts the official baidu/Qianfan-OCR Hugging Face model to
-an MLX checkpoint. This wrapper keeps the public model id as baidu/Qianfan-OCR
-while loading the converted local MLX path internally.
+The shell launcher keeps the public OCR model id as baidu/Qianfan-OCR. It first
+tries to convert that official Hugging Face model to MLX; when current mlx-vlm
+does not support direct qianfan_ocr conversion yet, it downloads a preconverted
+Qianfan MLX checkpoint and serves it under the official model id.
 """
 from __future__ import annotations
 

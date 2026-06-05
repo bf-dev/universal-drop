@@ -2,6 +2,7 @@
 set -euo pipefail
 
 MODEL_ID="${QIANFAN_OCR_MODEL:-baidu/Qianfan-OCR}"
+MLX_REPO="${QIANFAN_OCR_MLX_REPO:-jason1966/Qianfan-OCR-MLX-4bit}"
 HOST="${QIANFAN_OCR_HOST:-0.0.0.0}"
 PORT="${QIANFAN_OCR_PORT:-9361}"
 PYTHON="${QIANFAN_OCR_PYTHON:-python3.12}"
@@ -9,6 +10,29 @@ ROOT="${QIANFAN_OCR_ROOT:-$HOME/Documents/universal-drop-models/qianfan-ocr-mlx}
 VENV="${QIANFAN_OCR_VENV:-$ROOT/.venv}"
 MLX_PATH="${QIANFAN_OCR_MLX_PATH:-$ROOT/baidu-Qianfan-OCR-4bit}"
 Q_BITS="${QIANFAN_OCR_Q_BITS:-4}"
+
+download_preconverted_mlx() {
+  echo "Downloading MLX checkpoint $MLX_REPO to $MLX_PATH ..." >&2
+  "$VENV/bin/python" - "$MLX_REPO" "$MLX_PATH" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+repo_id = sys.argv[1]
+target = Path(sys.argv[2])
+if target.exists():
+    for child in target.iterdir():
+        if child.name == ".venv":
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+target.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id=repo_id, local_dir=str(target))
+PY
+}
 
 if ! command -v "$PYTHON" >/dev/null 2>&1; then
   echo "Missing $PYTHON. Set QIANFAN_OCR_PYTHON to a Python 3.10+ executable." >&2
@@ -25,18 +49,26 @@ fi
 if [ ! -f "$MLX_PATH/config.json" ]; then
   mkdir -p "$MLX_PATH"
   echo "Converting $MODEL_ID to MLX at $MLX_PATH ..." >&2
+  set +e
   if [ -x "$VENV/bin/mlx_vlm.convert" ]; then
     "$VENV/bin/mlx_vlm.convert" \
       --hf-path "$MODEL_ID" \
       --mlx-path "$MLX_PATH" \
       --quantize \
       --q-bits "$Q_BITS"
+    convert_status=$?
   else
     "$VENV/bin/python" -m mlx_vlm.convert \
       --hf-path "$MODEL_ID" \
       --mlx-path "$MLX_PATH" \
       --quantize \
       --q-bits "$Q_BITS"
+    convert_status=$?
+  fi
+  set -e
+  if [ "$convert_status" -ne 0 ]; then
+    echo "Direct MLX conversion failed; falling back to preconverted Qianfan MLX checkpoint." >&2
+    download_preconverted_mlx
   fi
 fi
 

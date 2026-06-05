@@ -43,7 +43,7 @@ mkdir -p \
 APP_PORT=9360 docker compose up --build -d
 ```
 
-Run a local Qianfan OCR MLX service on the host. The script downloads `baidu/Qianfan-OCR`, converts it to a 4-bit MLX checkpoint under `~/Documents/universal-drop-models/qianfan-ocr-mlx`, then serves an OpenAI-compatible `/v1/chat/completions` endpoint:
+Run a local Qianfan OCR MLX service on the host. The script serves the public model id `baidu/Qianfan-OCR` through an OpenAI-compatible `/v1/chat/completions` endpoint. It first tries to convert the official Hugging Face model to a 4-bit MLX checkpoint under `~/Documents/universal-drop-models/qianfan-ocr-mlx`; if current `mlx-vlm` cannot convert the Qianfan architecture directly yet, it downloads a preconverted Qianfan MLX checkpoint for Apple Silicon inference:
 
 ```bash
 scripts/qianfan-ocr-mlx-server.sh
@@ -141,7 +141,8 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `ARCHIVE_DIR` | `/data/archive` | Successful-original archive. |
 | `FAILED_DIR` | `/data/failed` | Terminal-failure dead-letter folder. |
 | `QIANFAN_OCR_BASE_URL` | `http://host.docker.internal:9361/v1` | OpenAI-compatible Qianfan OCR service base URL. |
-| `QIANFAN_OCR_MODEL` | `baidu/Qianfan-OCR` | Hugging Face source model used for image/PDF/webpage/video-frame OCR. The MLX server script converts this official model locally. |
+| `QIANFAN_OCR_MODEL` | `baidu/Qianfan-OCR` | Public model id sent to the OCR service and exposed by the local MLX wrapper. |
+| `QIANFAN_OCR_MLX_REPO` | `jason1966/Qianfan-OCR-MLX-4bit` | Apple Silicon MLX checkpoint fallback used only when direct conversion of `baidu/Qianfan-OCR` is not supported by current `mlx-vlm`. |
 | `QIANFAN_OCR_TIMEOUT_SECONDS` | `600` | Per-image Qianfan OCR HTTP timeout. |
 | `QIANFAN_OCR_MAX_TOKENS` | `4096` | Maximum generated OCR tokens per image/page. |
 | `WHISPER_CLI` | `whisper-cli` | whisper.cpp CLI executable. |
