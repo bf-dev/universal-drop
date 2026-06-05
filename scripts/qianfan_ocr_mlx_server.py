@@ -13,11 +13,10 @@ import json
 import mimetypes
 import os
 import tempfile
-import threading
 import time
 import traceback
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -38,7 +37,6 @@ DEFAULT_MAX_TOKENS = int(os.environ.get("QIANFAN_OCR_MAX_TOKENS", "4096"))
 print(f"Loading Qianfan OCR MLX checkpoint: {MLX_PATH}", flush=True)
 _MODEL, _PROCESSOR = load(MLX_PATH, trust_remote_code=True)
 _CONFIG = load_config(MLX_PATH)
-_GENERATE_LOCK = threading.Lock()
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -143,14 +141,13 @@ class Handler(BaseHTTPRequestHandler):
                     _error(self, HTTPStatus.BAD_REQUEST, "at least one image is required")
                     return
                 formatted_prompt = apply_chat_template(_PROCESSOR, _CONFIG, prompt, num_images=len(images))
-                with _GENERATE_LOCK:
-                    output = generate(
-                        _MODEL,
-                        _PROCESSOR,
-                        formatted_prompt,
-                        images,
-                        max_tokens=max_tokens,
-                    )
+                output = generate(
+                    _MODEL,
+                    _PROCESSOR,
+                    formatted_prompt,
+                    images,
+                    max_tokens=max_tokens,
+                )
             created = int(time.time())
             _json_response(
                 self,
@@ -175,7 +172,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server = HTTPServer((HOST, PORT), Handler)
     print(f"Qianfan OCR MLX server listening on http://{HOST}:{PORT}/v1", flush=True)
     server.serve_forever()
 
