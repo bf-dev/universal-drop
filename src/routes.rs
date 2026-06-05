@@ -2,6 +2,7 @@ use crate::{
     jobs::{Job, JobStatus},
     service::{AppState, QueuePriority, sanitize_filename, unique_path_for_filename},
 };
+use axum::extract::DefaultBodyLimit;
 use axum::{
     Json, Router,
     body::Bytes,
@@ -24,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs", get(list_jobs))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/result", get(get_job_result))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state)
 }
 
