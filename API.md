@@ -155,14 +155,12 @@ The service watches the input directory, converts the file, writes Markdown to `
 
 ## Conversion notes
 
-- PDFs are always rendered page-by-page, auto-oriented with native OpenCV when a whole page is confidently sideways or upside down, confirmed with local Tesseract OCR scoring, and OCRed into Markdown with Gemini first (`GEMINI_DEPLOYMENT_ID`, default `gemini-3-flash-preview`) plus local Ollama `glm-ocr` fallback.
+- PDFs are always rendered page-by-page, auto-oriented with native OpenCV when a whole page is confidently sideways or upside down, confirmed with local Tesseract OCR scoring, and OCRed into Markdown with Qianfan OCR (`QIANFAN_OCR_MODEL`, default `baidu/Qianfan-OCR`).
 - PDF pages render at `PDF_RENDER_DPI` before OCR; the default is `150` for faster CPU OCR on this M1/Asahi host. `PDF_AUTO_ORIENT=true` runs OpenCV orientation detection first and only applies 90/180/270-degree rotations, never small deskew rotations. `PDF_ORIENT_OCR_CONFIRM=true` then compares Tesseract TSV confidence scores for the original render and proposed rotated render, and only replaces the original render when the candidate score improves enough.
-- Standalone image files (`.jpg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`, `.heic`, etc.) are also OCRed into Markdown with Gemini first and local Ollama `glm-ocr` fallback.
-- Set `GEMINI_API_KEY` to enable Gemini OCR. The default endpoint template is `https://api.hku.hk/gemini/student/{deployment-id}:generateContent`, and the default subscription-key header is `api-key`. Gemini calls are paced by `GEMINI_MIN_INTERVAL_SECONDS` (default `21`) to respect the student API rate limit.
-- Ollama OCR/frame-analysis requests include `keep_alive` and `num_thread` settings from `OLLAMA_KEEP_ALIVE` and `OLLAMA_NUM_THREAD`.
-- Ollama OCR/frame-analysis requests are bounded by `OLLAMA_TIMEOUT_SECONDS` (default `600`).
+- Standalone image files (`.jpg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`, `.heic`, etc.) are also OCRed into Markdown with Qianfan OCR.
+- Configure `QIANFAN_OCR_BASE_URL` to point at an OpenAI-compatible Qianfan OCR service; the bundled Apple Silicon helper converts and serves the official `baidu/Qianfan-OCR` model through MLX. Requests are bounded by `QIANFAN_OCR_TIMEOUT_SECONDS` and `QIANFAN_OCR_MAX_TOKENS`.
 - Audio files are normalized with `ffmpeg` and transcribed by launching `whisper.cpp` only for that job. Consecutive duplicate Whisper lines are collapsed before Markdown output. Whisper defaults are tuned for speed: 8 threads, beam size 1, best-of 1, and no fallback retries.
-- Video files are converted locally by extracting audio for Whisper large-v3 and selecting a bounded set of significant visual frames with FFmpeg scene-change detection. The service analyzes the first selected frame and compares later selected frames to the previous selected frame through local Ollama, instead of describing every frame. If a selected frame fails analysis, the job keeps the transcript and other frame notes instead of failing the whole video.
+- Video files are converted locally by extracting audio for Whisper large-v3 and selecting a bounded set of significant visual frames with FFmpeg scene-change detection. The service analyzes selected frames through Qianfan OCR instead of describing every frame. If a selected frame fails analysis, the job keeps the transcript and other frame notes instead of failing the whole video.
 - Video frame controls are `VIDEO_MIN_FRAMES`, `VIDEO_MAX_FRAMES`, and `VIDEO_SCENE_THRESHOLD`.
 - CSV/TSV output is capped by `MAX_CSV_ROWS`.
 - Terminal failed conversions move the source file to the failed/dead-letter directory and put the failure message in the job's `error` field.

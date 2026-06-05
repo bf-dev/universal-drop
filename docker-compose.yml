@@ -9,19 +9,10 @@ services:
       RESULTS_DIR: /data/results
       ARCHIVE_DIR: /data/archive
       FAILED_DIR: /data/failed
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-glm-ocr}
-      OLLAMA_KEEP_ALIVE: 30m
-      OLLAMA_NUM_THREAD: 8
-      OLLAMA_TIMEOUT_SECONDS: "${OLLAMA_TIMEOUT_SECONDS:-600}"
-      GEMINI_OCR_ENABLED: "${GEMINI_OCR_ENABLED:-true}"
-      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
-      GEMINI_API_KEY_HEADER: "${GEMINI_API_KEY_HEADER:-api-key}"
-      GEMINI_API_ENDPOINT: "${GEMINI_API_ENDPOINT:-https://api.hku.hk/gemini/student/{deployment-id}:generateContent}"
-      GEMINI_DEPLOYMENT_ID: "${GEMINI_DEPLOYMENT_ID:-gemini-3-flash-preview}"
-      GEMINI_THINKING_BUDGET: "${GEMINI_THINKING_BUDGET:-}"
-      GEMINI_TIMEOUT_SECONDS: "${GEMINI_TIMEOUT_SECONDS:-180}"
-      GEMINI_MIN_INTERVAL_SECONDS: "${GEMINI_MIN_INTERVAL_SECONDS:-21}"
+      QIANFAN_OCR_BASE_URL: ${QIANFAN_OCR_BASE_URL:-http://host.docker.internal:9361/v1}
+      QIANFAN_OCR_MODEL: ${QIANFAN_OCR_MODEL:-baidu/Qianfan-OCR}
+      QIANFAN_OCR_TIMEOUT_SECONDS: "${QIANFAN_OCR_TIMEOUT_SECONDS:-600}"
+      QIANFAN_OCR_MAX_TOKENS: "${QIANFAN_OCR_MAX_TOKENS:-4096}"
       WHISPER_CLI: whisper-cli
       WHISPER_MODEL_PATH: /models/whisper/ggml-large-v3.bin
       WHISPER_THREADS: 8
@@ -53,23 +44,4 @@ services:
       - ${DROP_ARCHIVE_DIR:-/Users/bfdev/Documents/universal-drop-archive}:/data/archive
       - ${DROP_FAILED_DIR:-/Users/bfdev/Documents/universal-drop-failed}:/data/failed
       - ${WHISPER_MODELS_DIR:-/Users/bfdev/Documents/universal-drop-models/whisper}:/models/whisper:ro
-    depends_on:
-      - ollama
     restart: unless-stopped
-
-  ollama:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
-    ports:
-      - "11434:11434"
-    environment:
-      OLLAMA_KEEP_ALIVE: 30m
-      OLLAMA_NUM_PARALLEL: 1
-      OLLAMA_FLASH_ATTENTION: 1
-      OLLAMA_VULKAN: 0
-      OLLAMA_LLM_LIBRARY: ${OLLAMA_LLM_LIBRARY:-}
-    volumes:
-      - ollama-data:/root/.ollama
-    restart: unless-stopped
-
-volumes:
-  ollama-data:

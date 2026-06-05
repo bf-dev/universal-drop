@@ -1,100 +1,30 @@
-# Universal Drop MVP Plan
+# Universal Drop Plan
 
 ## Summary
-Build a greenfield Rust + Docker project that converts dropped/uploaded files into LLM-ready Markdown text.
+Universal Drop converts dropped/uploaded files into LLM-ready Markdown through a Rust HTTP service and watched folders.
 
-- MVP shape: attached filesystem folders plus a minimal HTTP API.
-- Input/result/archive folders are Docker-mounted volumes.
-- Results are Markdown only for users; internal job state may use SQLite or in-memory metadata.
-- Processing is single-job-at-a-time to conserve memory.
-- PDFs are always OCR-read page-by-page with Ollama `glm-ocr`.
-- Audio is transcribed by invoking `whisper.cpp` only during audio jobs, so Whisper models are not resident when idle.
-- Videos are converted locally by transcribing their audio and analyzing only a bounded set of significant visual frames.
-- Originals are moved to an archive folder after successful conversion.
+- Input/result/archive/failed folders are Docker-mounted volumes.
+- Processing is single-job-at-a-time to keep memory predictable.
+- PDF/image/webpage/video-frame OCR uses a local Qianfan OCR service, defaulting to `baidu/Qianfan-OCR`.
+- Audio is transcribed by invoking `whisper.cpp` only during audio jobs.
+- Videos transcribe audio and analyze a bounded set of selected visual frames.
+- Originals move to archive after successful conversion; terminal failures move to the failed folder.
 
-## Key Implementation Changes
-- Scaffold a Rust service using:
-  - `axum` for HTTP API.
-  - `tokio` async runtime.
-  - `notify` for watching the input directory.
-  - `serde`, `uuid`, `mime_guess`, `tracing`.
-  - optional `sqlx` + SQLite for durable job tracking.
-- Add Docker assets:
-  - `Dockerfile` for the Rust app with required CLI tools: `ffmpeg`, `poppler-utils`, `libreoffice`, `pandoc` if practical, `whisper.cpp`.
-  - `docker-compose.yml` with:
-    - `app` service.
-    - `ollama` service.
-    - mounted `~/Documents/universal-drop-input:/data/input`, `~/Documents/notes/ai_process_dump:/data/results`, `~/Documents/universal-drop-archive:/data/archive`, and model/cache volumes.
-    - `OLLAMA_KEEP_ALIVE=30m` and app requests using `keep_alive: "30m"` for `glm-ocr`.
-    - Whisper CPU speed settings for M1/Asahi: native/OpenBLAS build, 8 threads, beam size 1, best-of 1, and no fallback retries.
-    - Native OpenCV helper for PDF page auto-orientation before OCR, rotating only whole pages by 90/180/270 degrees when confident; no small-angle deskew under 45-50 degrees.
-- Add repo hygiene:
-  - `.gitignore` including `.env`, `.env.*`, `.secrets/`, logs/cache/build outputs, OS/IDE files, `node_modules/`, `target/`, and `DEPLOYMENT.md`.
-  - `README.md` with local Docker usage.
-  - `DEPLOYMENT.md` kept gitignored if deployment details are needed later.
+## Key Implementation Shape
+- Rust service with `axum`, `tokio`, `notify`, `serde`, `uuid`, `mime_guess`, and `tracing`.
+- Docker app container with `ffmpeg`, Poppler, LibreOffice, Pandoc, Tesseract, Chromium, `whisper.cpp`, and the PDF orientation helper.
+- Host-native Qianfan OCR service exposed through an OpenAI-compatible `/v1/chat/completions` endpoint.
+- Data folders mounted under `/data/input`, `/data/results`, `/data/archive`, and `/data/failed`.
 
 ## Conversion Behavior
-- File discovery:
-  - Watch `/data/input`.
-  - Also scan input folder on startup for unprocessed files.
-  - Queue one job at a time.
-  - On success, write Markdown to `/data/results/<original-name>.md` and move the source file to `/data/archive/`.
-  - On failure, keep the input file in place and expose failure status through the API/logs.
-- HTTP API:
-  - `GET /health`
-  - `POST /files` multipart upload; stores into input folder and queues conversion.
-  - `GET /jobs` list recent jobs.
-  - `GET /jobs/{id}` status.
-  - `GET /jobs/{id}/result` returns Markdown when ready.
-- PDF handling:
-  - Render every PDF page to images using Poppler.
-  - Send each page image to Ollama `glm-ocr`.
-  - Produce Markdown with page headings and preserved tables/layout where possible.
-  - Use `glm-ocr` because Ollama lists it as a multimodal OCR model for complex document understanding, and expose it through local Ollama API.
-- Audio handling:
-  - Use `ffmpeg` to normalize/extract audio.
-  - Invoke `whisper.cpp` CLI as a subprocess per audio job.
-  - Configure model path through `WHISPER_MODEL_PATH`, defaulting to a mounted multilingual large-v3 model path.
-  - Do not run Whisper as a long-lived server.
-- Video handling:
-  - Detect common video containers (`mp4`, `mov`, `mkv`, `webm`, `avi`, etc.).
-  - Extract and transcribe audio with the same Whisper large-v3 path.
-  - Use FFmpeg scene-change detection with `VIDEO_SCENE_THRESHOLD` to select significant visual frames.
-  - Enforce `VIDEO_MIN_FRAMES` and `VIDEO_MAX_FRAMES` so the service adds sparse fallback samples when too few changes are found, but never compares every frame or creates unbounded Markdown.
-  - Analyze the first selected frame and compare each later selected frame to the previous selected frame through local Ollama.
-- Document handling:
-  - Plain text/Markdown: copy/normalize to Markdown.
-  - CSV/TSV: convert to Markdown table, with row-count safeguards for very large files.
-  - DOC/DOCX/ODT/PPT/PPTX/XLS/XLSX and similar office files: convert through headless LibreOffice and/or Pandoc to text/Markdown.
-  - Unknown binary types: mark unsupported with a clear job error.
+- `GET /health`, `POST /files`, `POST /text`, `GET /jobs`, `GET /jobs/{id}`, and `GET /jobs/{id}/result`.
+- PDFs render every page to images, auto-orient safe whole-page rotations, then send each page image to Qianfan OCR.
+- Images go directly to Qianfan OCR.
+- Audio normalizes through `ffmpeg` and transcribes through `whisper.cpp`.
+- Videos extract/transcribe audio, select frames with FFmpeg scene-change detection, and analyze selected frames with Qianfan OCR.
+- Plain text/Markdown normalize directly; CSV/TSV convert to capped Markdown tables; office files try Pandoc then LibreOffice.
 
 ## Test Plan
-- Unit tests:
-  - MIME/extension routing.
-  - output path generation.
-  - archive behavior.
-  - Markdown normalization.
-  - CSV-to-Markdown conversion.
-- Integration tests:
-  - Drop a `.txt`, `.csv`, `.docx`, audio sample, and PDF into input folder and verify `.md` outputs.
-  - Upload through `POST /files` and fetch result through API.
-  - Failed conversion leaves original in input folder.
-  - Successful conversion moves original to archive.
-- Docker smoke tests:
-  - `docker compose up --build`.
-  - `GET /health` succeeds.
-  - Ollama service reachable from app.
-  - `glm-ocr` request uses 5-minute keep-alive behavior.
-  - Whisper process is absent when idle and only appears during audio processing.
-
-## Assumptions and Defaults
-- Default result artifact is only the user-facing Markdown file; job metadata is internal.
-- Default Whisper model is multilingual `large-v3`, configurable by environment variable.
-- Default video frame budget is 3 to 24 selected frames with a 0.35 scene threshold.
-- Default PDF render DPI is 150 to reduce CPU OCR image cost.
-- Default PDF auto-orientation is enabled with native OpenCV and conservative whole-page rotation thresholds.
-- Dockerized Ollama is configured for experimental Vulkan opt-in and `/dev/dri` passthrough, but current arm64 Ollama on this Apple GPU stack still falls back to CPU; OCR acceleration is therefore CPU-oriented unless Ollama gains a usable Vulkan backend here.
-- PDF OCR is always used, not text-first fallback.
-- Concurrency is one conversion job at a time.
-- Ollama unload policy follows Ollama's documented default/`keep_alive` behavior: models are kept in memory for 5 minutes unless configured otherwise. Source: https://github.com/ollama/ollama/blob/main/docs/faq.mdx
-- GLM-OCR model details are based on the Ollama model page: https://ollama.com/library/glm-ocr
+- Unit tests for route detection, output path generation, Markdown normalization, CSV conversion, URL extraction, transcript dedupe, and Qianfan URL construction.
+- Runtime checks for health, upload/result flow, watched-folder processing, and failed-file dead-letter behavior.
+- Build checks for Docker compose config and release build.

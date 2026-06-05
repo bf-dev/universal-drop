@@ -1,6 +1,6 @@
 # Universal Drop
 
-Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a small HTTP API for converting dropped or uploaded files into LLM-ready Markdown.
+Universal Drop is a Rust + Docker service that watches an input folder and exposes a small HTTP API for converting dropped or uploaded files into LLM-ready Markdown.
 
 ## What it does
 
@@ -10,10 +10,10 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 - Moves successfully converted originals to `ARCHIVE_DIR`.
 - Moves terminally failed originals to `FAILED_DIR` after `MAX_JOB_ATTEMPTS`, so one bad file cannot keep re-entering the watched queue forever.
 - Accepts plain text through `/text` and auto-detects HTTP(S) URLs in `.txt` drops.
-- OCRs PDF pages and standalone image files with the HKU Vertex AI Gemini endpoint first, using `gemini-3-flash-preview` by default, then falls back to local Ollama `glm-ocr` if Gemini is unavailable, rate-limited, or not configured.
+- OCRs PDF pages and standalone image files through a local Qianfan OCR MLX service, defaulting to `baidu/Qianfan-OCR`.
 - Auto-detects and corrects whole-page PDF render orientation with native OpenCV before OCR, rotating only by 90/180/270 degrees when confidence is high enough. It never performs small-angle deskew rotations.
 - Runs `whisper.cpp` only as a subprocess during audio transcription jobs, with CPU-native/OpenBLAS build acceleration and fast large-v3 decoding defaults.
-- Converts videos into Markdown by transcribing audio with Whisper large-v3 and analyzing only selected significant visual frames with local Ollama.
+- Converts videos into Markdown by transcribing audio with Whisper large-v3 and analyzing only selected significant visual frames with Qianfan OCR.
 - Converts URLs by trying `yt-dlp` first for media/recording pages, then falling back to headless Chromium webpage capture plus PDF/page OCR.
 
 ## Supported inputs
@@ -23,10 +23,10 @@ Universal Drop is a Rust + Docker MVP that watches an input folder and exposes a
 | `.txt`, `.text`, `.url`, `.urls` | Normalize to Markdown text and auto-detect HTTP(S) URLs for URL conversion. |
 | `.md`, code/config text files | Normalize to Markdown text without URL expansion. |
 | `.csv`, `.tsv` | Convert to a Markdown table, capped by `MAX_CSV_ROWS`. |
-| `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif` | OCR the image into faithful Markdown with Gemini first, falling back to local Ollama `glm-ocr` if the API call fails or Gemini is not configured. |
-| `.pdf` | Render every page with Poppler, auto-orient whole upside-down/sideways page renders with native OpenCV, confirm proposed rotations with local Tesseract OCR scoring, and OCR each page into faithful Markdown with Gemini first and local Ollama `glm-ocr` fallback; default render DPI is tuned lower for CPU OCR speed. |
+| `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif` | OCR the image into faithful Markdown with Qianfan OCR. |
+| `.pdf` | Render every page with Poppler, auto-orient whole upside-down/sideways page renders with native OpenCV, confirm proposed rotations with local Tesseract OCR scoring, and OCR each page into faithful Markdown with Qianfan OCR. |
 | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, etc. | Normalize with `ffmpeg`, transcribe with `whisper.cpp`, collapse consecutive duplicate Whisper lines, then write a transcript Markdown file. |
-| `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, etc. | Extract audio for Whisper large-v3, use FFmpeg scene-change detection plus sparse fallback samples, compare selected frames through local Ollama, and write a bounded Markdown summary. |
+| `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, etc. | Extract audio for Whisper large-v3, use FFmpeg scene-change detection plus sparse fallback samples, analyze selected frames through Qianfan OCR, and write a bounded Markdown summary. |
 | `.doc`, `.docx`, `.odt`, `.pptx`, `.xlsx`, etc. | Try Pandoc first, then headless LibreOffice text conversion. |
 | HTTP(S) URLs submitted through `/text` or a URL text file | Try `yt-dlp` for YouTube and other supported media/recording pages; if no media is downloaded, capture the webpage with headless Chromium into paginated pages and OCR it. |
 | Unknown binary files | Mark the job failed with an unsupported-type error. |
@@ -41,15 +41,19 @@ mkdir -p \
   ~/Documents/universal-drop-models/whisper
 
 APP_PORT=9360 docker compose up --build -d
-
-docker compose exec ollama ollama pull glm-ocr
 ```
 
-To enable Gemini OCR, put the subscription key in your local, gitignored `.env` file or export it before starting Compose:
+Run a local Qianfan OCR MLX service on the host. The script downloads `baidu/Qianfan-OCR`, converts it to a 4-bit MLX checkpoint under `~/Documents/universal-drop-models/qianfan-ocr-mlx`, then serves an OpenAI-compatible `/v1/chat/completions` endpoint:
 
 ```bash
-GEMINI_API_KEY=<your-hku-subscription-key>
-GEMINI_DEPLOYMENT_ID=gemini-3-flash-preview
+scripts/qianfan-ocr-mlx-server.sh
+```
+
+Point the app at that service through `.env` or the shell:
+
+```bash
+QIANFAN_OCR_BASE_URL=http://host.docker.internal:9361/v1
+QIANFAN_OCR_MODEL=baidu/Qianfan-OCR
 ```
 
 Place a whisper.cpp-compatible multilingual large-v3 model at:
@@ -64,12 +68,12 @@ The mounted data folders are configurable through Compose variables:
 
 | Compose variable | Default host directory | Container path |
 | --- | --- | --- |
-| `DROP_INPUT_DIR` | `/home/bfdev/Documents/universal-drop-input` | `/data/input` |
-| `DROP_RESULTS_DIR` | `/home/bfdev/Documents/universal-drop-outputs` | `/data/results` |
-| `DROP_ARCHIVE_DIR` | `/home/bfdev/Documents/universal-drop-archive` | `/data/archive` |
-| `DROP_FAILED_DIR` | `/home/bfdev/Documents/universal-drop-failed` | `/data/failed` |
+| `DROP_INPUT_DIR` | `/Users/bfdev/Documents/universal-drop-input` | `/data/input` |
+| `DROP_RESULTS_DIR` | `/Users/bfdev/Documents/universal-drop-outputs` | `/data/results` |
+| `DROP_ARCHIVE_DIR` | `/Users/bfdev/Documents/universal-drop-archive` | `/data/archive` |
+| `DROP_FAILED_DIR` | `/Users/bfdev/Documents/universal-drop-failed` | `/data/failed` |
 
-`WHISPER_MODELS_DIR` defaults to `/home/bfdev/Documents/universal-drop-models/whisper` for the optional Whisper model mount.
+`WHISPER_MODELS_DIR` defaults to `/Users/bfdev/Documents/universal-drop-models/whisper` for the optional Whisper model mount.
 
 ## API
 
@@ -136,19 +140,10 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `RESULTS_DIR` | `/data/results` | Markdown output folder. |
 | `ARCHIVE_DIR` | `/data/archive` | Successful-original archive. |
 | `FAILED_DIR` | `/data/failed` | Terminal-failure dead-letter folder. |
-| `OLLAMA_BASE_URL` | `http://ollama:11434` | Local Ollama API base URL. The app currently targets local HTTP Ollama. |
-| `OLLAMA_MODEL` | `glm-ocr` | Multimodal OCR model. |
-| `OLLAMA_KEEP_ALIVE` | `30m` | Sent in PDF/video OCR requests and mirrored in compose for Ollama to reduce model reloads. |
-| `OLLAMA_NUM_THREAD` | `8` | Per-request Ollama CPU thread count for OCR/frame analysis. |
-| `OLLAMA_TIMEOUT_SECONDS` | `600` | Per-request Ollama HTTP timeout so a hung local model call cannot hold the queue forever. |
-| `GEMINI_OCR_ENABLED` | `true` | Try Gemini first for PDF page OCR and standalone image OCR when an API key is configured. Set to `false` to force local Ollama OCR. |
-| `GEMINI_API_KEY` | unset | HKU/Azure API Management subscription key for Gemini. Keep this in local `.env` or the shell only; never commit it. `HKU_GEMINI_API_KEY` is also accepted as a fallback variable name. |
-| `GEMINI_API_KEY_HEADER` | `api-key` | Header used for the HKU API Management subscription key. |
-| `GEMINI_API_ENDPOINT` | `https://api.hku.hk/gemini/student/{deployment-id}:generateContent` | Gemini generateContent endpoint template. `{deployment-id}` or `{deployment_id}` is replaced by `GEMINI_DEPLOYMENT_ID`. |
-| `GEMINI_DEPLOYMENT_ID` | `gemini-3-flash-preview` | Gemini model/deployment used for image-to-Markdown OCR. |
-| `GEMINI_THINKING_BUDGET` | unset | Optional `generationConfig.thinkingConfig.thinkingBudget` value. Leave unset unless the gateway requires or benefits from it. |
-| `GEMINI_TIMEOUT_SECONDS` | `180` | Per-image Gemini HTTP timeout. Any timeout falls back to local Ollama OCR. |
-| `GEMINI_MIN_INTERVAL_SECONDS` | `21` | Minimum delay between Gemini OCR requests in the single-worker PDF/image pipeline, matching the student Gemini chat limit of about 3 calls per minute. Set to `0` to disable pacing. |
+| `QIANFAN_OCR_BASE_URL` | `http://host.docker.internal:9361/v1` | OpenAI-compatible Qianfan OCR service base URL. |
+| `QIANFAN_OCR_MODEL` | `baidu/Qianfan-OCR` | Hugging Face source model used for image/PDF/webpage/video-frame OCR. The MLX server script converts this official model locally. |
+| `QIANFAN_OCR_TIMEOUT_SECONDS` | `600` | Per-image Qianfan OCR HTTP timeout. |
+| `QIANFAN_OCR_MAX_TOKENS` | `4096` | Maximum generated OCR tokens per image/page. |
 | `WHISPER_CLI` | `whisper-cli` | whisper.cpp CLI executable. |
 | `WHISPER_MODEL_PATH` | `/models/whisper/ggml-large-v3.bin` | Mounted Whisper model path. |
 | `WHISPER_THREADS` | `8` | whisper.cpp compute threads. |
@@ -159,7 +154,7 @@ If the job is not complete, the endpoint returns `409 Conflict`.
 | `PDF_RENDER_DPI` | `150` | PDF page render DPI before OCR; higher values may improve tiny text but slow CPU OCR. |
 | `PDF_AUTO_ORIENT` | `true` | Run native OpenCV page-orientation detection before PDF OCR. Only 90/180/270-degree whole-page rotations are applied; small skew angles under the page-rotation threshold are not changed. |
 | `PDF_AUTO_ORIENT_CLI` | `pdf-page-auto-orient` | OpenCV helper executable used for PDF page orientation detection and safe rotation. |
-| `PDF_ORIENT_OCR_CONFIRM` | `true` | Confirm every proposed PDF page rotation with local Tesseract TSV confidence scoring before replacing the rendered original page. This does not use Ollama. |
+| `PDF_ORIENT_OCR_CONFIRM` | `true` | Confirm every proposed PDF page rotation with local Tesseract TSV confidence scoring before replacing the rendered original page. |
 | `PDF_ORIENT_OCR_CLI` | `tesseract` | OCR executable used only for recognition-driven page-orientation confirmation. |
 | `PDF_ORIENT_OCR_LANG` | `eng` | Tesseract language list for orientation confirmation. |
 | `PDF_ORIENT_OCR_MIN_CONFIDENCE` | `0.60` | Minimum relative OCR-score improvement required before applying a proposed page rotation. |
@@ -191,15 +186,14 @@ For local non-Docker runs, set the data directories explicitly:
 INPUT_DIR=~/Documents/universal-drop-input \
 RESULTS_DIR=~/Documents/universal-drop-outputs \
 ARCHIVE_DIR=~/Documents/universal-drop-archive \
-OLLAMA_BASE_URL=http://localhost:11434 \
+QIANFAN_OCR_BASE_URL=http://localhost:9361/v1 \
 cargo run
 ```
 
 ## Notes
 
-- PDF and image conversion always use OCR; there is intentionally no text-first fallback in the MVP. Gemini is tried first for page/image Markdown conversion, and any Gemini HTTP/parsing/network failure disables Gemini for the rest of that job and falls back to local Ollama `glm-ocr`.
-- Video conversion does not analyze every frame. It uses FFmpeg scene detection with a configured min/max frame budget, then asks local Ollama to describe the first key frame and compare each selected frame to the previous selected frame.
+- PDF and image conversion always use OCR through Qianfan OCR; there is intentionally no text-first fallback.
+- Video conversion does not analyze every frame. It uses FFmpeg scene detection with a configured min/max frame budget, then asks Qianfan OCR to analyze selected frames.
 - URL conversion omits source URLs from generated URL section headings and command failure logs to avoid accidental disclosure in logs. The original submitted text is still preserved in the Markdown for `.txt`/text drops.
-- On Fedora Asahi Remix, the Dockerized Ollama image is configured to opt into experimental Vulkan and receives `/dev/dri`, but current arm64 Ollama still falls back to CPU on this Apple GPU stack. OCR speedups therefore come from CPU threads, keep-alive, lower PDF DPI, and fewer video frames.
-- The job store is in-memory for this MVP. Restarting the service clears job metadata, but existing input files are scanned again on startup.
+- The job store is in-memory. Restarting the service clears job metadata, but existing input files are scanned again on startup.
 - Uploads are written to hidden `.uploading` files first, then atomically renamed so the watcher does not process partial uploads.

@@ -13,19 +13,10 @@ pub struct Config {
     pub archive_dir: PathBuf,
     pub failed_dir: PathBuf,
     pub bind_addr: SocketAddr,
-    pub ollama_base_url: String,
-    pub ollama_model: String,
-    pub ollama_keep_alive: String,
-    pub ollama_num_thread: usize,
-    pub ollama_timeout_seconds: usize,
-    pub gemini_ocr_enabled: bool,
-    pub gemini_api_key: Option<String>,
-    pub gemini_api_key_header: String,
-    pub gemini_api_endpoint: String,
-    pub gemini_deployment_id: String,
-    pub gemini_thinking_budget: Option<usize>,
-    pub gemini_timeout_seconds: usize,
-    pub gemini_min_interval_seconds: usize,
+    pub qianfan_ocr_base_url: String,
+    pub qianfan_ocr_model: String,
+    pub qianfan_ocr_timeout_seconds: usize,
+    pub qianfan_ocr_max_tokens: usize,
     pub whisper_model_path: PathBuf,
     pub whisper_cli: String,
     pub whisper_threads: usize,
@@ -96,27 +87,12 @@ impl Config {
             archive_dir: env_path("ARCHIVE_DIR", "/data/archive"),
             failed_dir: env_path("FAILED_DIR", "/data/failed"),
             bind_addr,
-            ollama_base_url: env::var("OLLAMA_BASE_URL")
-                .unwrap_or_else(|_| "http://ollama:11434".to_string()),
-            ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "glm-ocr".to_string()),
-            ollama_keep_alive: env::var("OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "30m".to_string()),
-            ollama_num_thread: parse_env_usize("OLLAMA_NUM_THREAD", 8)?,
-            ollama_timeout_seconds: parse_env_usize("OLLAMA_TIMEOUT_SECONDS", 600)?,
-            gemini_ocr_enabled: parse_env_bool("GEMINI_OCR_ENABLED", true)?,
-            gemini_api_key: env_nonempty("GEMINI_API_KEY")
-                .or_else(|| env_nonempty("HKU_GEMINI_API_KEY")),
-            gemini_api_key_header: env_nonempty("GEMINI_API_KEY_HEADER")
-                .unwrap_or_else(|| "api-key".to_string()),
-            gemini_api_endpoint: env_nonempty("GEMINI_API_ENDPOINT")
-                .or_else(|| env_nonempty("GEMINI_ENDPOINT"))
-                .unwrap_or_else(|| {
-                    "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string()
-                }),
-            gemini_deployment_id: env_nonempty("GEMINI_DEPLOYMENT_ID")
-                .unwrap_or_else(|| "gemini-3-flash-preview".to_string()),
-            gemini_thinking_budget: parse_optional_env_usize("GEMINI_THINKING_BUDGET")?,
-            gemini_timeout_seconds: parse_env_usize("GEMINI_TIMEOUT_SECONDS", 180)?,
-            gemini_min_interval_seconds: parse_env_usize("GEMINI_MIN_INTERVAL_SECONDS", 21)?,
+            qianfan_ocr_base_url: env_nonempty("QIANFAN_OCR_BASE_URL")
+                .unwrap_or_else(|| "http://host.docker.internal:9361/v1".to_string()),
+            qianfan_ocr_model: env_nonempty("QIANFAN_OCR_MODEL")
+                .unwrap_or_else(|| "baidu/Qianfan-OCR".to_string()),
+            qianfan_ocr_timeout_seconds: parse_env_usize("QIANFAN_OCR_TIMEOUT_SECONDS", 600)?,
+            qianfan_ocr_max_tokens: parse_env_usize("QIANFAN_OCR_MAX_TOKENS", 4096)?,
             whisper_model_path: env_path("WHISPER_MODEL_PATH", "/models/whisper/ggml-large-v3.bin"),
             whisper_cli: env::var("WHISPER_CLI").unwrap_or_else(|_| "whisper-cli".to_string()),
             whisper_threads: parse_env_usize("WHISPER_THREADS", 8)?,
@@ -211,16 +187,6 @@ fn parse_env_usize(key: &str, default: usize) -> Result<usize> {
     }
 }
 
-fn parse_optional_env_usize(key: &str) -> Result<Option<usize>> {
-    match env_nonempty(key) {
-        Some(value) => value
-            .parse::<usize>()
-            .map(Some)
-            .with_context(|| format!("{key} must be a positive integer")),
-        None => Ok(None),
-    }
-}
-
 fn parse_env_f32(key: &str, default: f32) -> Result<f32> {
     match env::var(key) {
         Ok(value) => value
@@ -253,20 +219,10 @@ mod tests {
             archive_dir: PathBuf::from("/tmp/archive"),
             failed_dir: PathBuf::from("/tmp/failed"),
             bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
-            ollama_base_url: "http://localhost:11434".to_string(),
-            ollama_model: "glm-ocr".to_string(),
-            ollama_keep_alive: "30m".to_string(),
-            ollama_num_thread: 8,
-            ollama_timeout_seconds: 600,
-            gemini_ocr_enabled: true,
-            gemini_api_key: None,
-            gemini_api_key_header: "api-key".to_string(),
-            gemini_api_endpoint:
-                "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string(),
-            gemini_deployment_id: "gemini-3-flash-preview".to_string(),
-            gemini_thinking_budget: None,
-            gemini_timeout_seconds: 180,
-            gemini_min_interval_seconds: 21,
+            qianfan_ocr_base_url: "http://localhost:9361/v1".to_string(),
+            qianfan_ocr_model: "baidu/Qianfan-OCR".to_string(),
+            qianfan_ocr_timeout_seconds: 600,
+            qianfan_ocr_max_tokens: 4096,
             whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
             whisper_threads: 8,

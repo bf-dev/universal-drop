@@ -2,10 +2,7 @@ use crate::config::Config;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use mime_guess::MimeGuess;
-use reqwest::{
-    Client,
-    header::{HeaderName, HeaderValue},
-};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
@@ -473,17 +470,9 @@ async fn image_to_markdown(path: &Path, config: &Config, client: &Client) -> Res
         .file_name()
         .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| "image".into());
-    let mut gemini_disabled_for_job = false;
-    let mut last_gemini_attempt = None;
-    let page_markdown = ocr_document_image_to_markdown(
-        path,
-        config,
-        client,
-        &mut gemini_disabled_for_job,
-        &mut last_gemini_attempt,
-    )
-    .await
-    .with_context(|| format!("OCR failed for image {}", path.display()))?;
+    let page_markdown = ocr_document_image_to_markdown(path, config, client)
+        .await
+        .with_context(|| format!("OCR failed for image {}", path.display()))?;
     Ok(format!("# OCR: {title}\n\n{}\n", page_markdown.trim()))
 }
 
@@ -500,21 +489,11 @@ async fn pdf_to_markdown(path: &Path, config: &Config, client: &Client) -> Resul
         .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| "document.pdf".into());
     let mut output = format!("# OCR: {title}\n\n");
-    let mut gemini_disabled_for_job = false;
-    let mut last_gemini_attempt = None;
     let mut succeeded_pages = 0usize;
     let mut failed_pages = 0usize;
     for (index, page_path) in pages.iter().enumerate() {
         output.push_str(&format!("## Page {}\n\n", index + 1));
-        match ocr_document_image_to_markdown(
-            page_path,
-            config,
-            client,
-            &mut gemini_disabled_for_job,
-            &mut last_gemini_attempt,
-        )
-        .await
-        {
+        match ocr_document_image_to_markdown(page_path, config, client).await {
             Ok(page_markdown) => {
                 succeeded_pages += 1;
                 output.push_str(page_markdown.trim());
@@ -923,241 +902,60 @@ Requirements:
 - Do not wrap the response in a Markdown code fence such as ```text, ```md, or ```markdown.";
 
 #[derive(Debug, Serialize)]
-struct GeminiGenerateRequest<'a> {
-    system_instruction: GeminiSystemInstruction<'a>,
-    contents: Vec<GeminiContent<'a>>,
-    #[serde(rename = "generationConfig")]
-    generation_config: GeminiGenerationConfig,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiSystemInstruction<'a> {
-    parts: Vec<GeminiTextPart<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiTextPart<'a> {
-    text: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiContent<'a> {
-    role: &'a str,
-    parts: Vec<GeminiRequestPart<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiRequestPart<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<&'a str>,
-    #[serde(rename = "inline_data", skip_serializing_if = "Option::is_none")]
-    inline_data: Option<GeminiInlineData<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiInlineData<'a> {
-    #[serde(rename = "mime_type")]
-    mime_type: &'a str,
-    data: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiGenerationConfig {
+struct QianfanChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<QianfanMessage<'a>>,
     temperature: f32,
-    #[serde(rename = "topP")]
-    top_p: f32,
-    #[serde(rename = "topK")]
-    top_k: usize,
-    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
-    thinking_config: Option<GeminiThinkingConfig>,
+    #[serde(rename = "max_tokens")]
+    max_tokens: usize,
+    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
-struct GeminiThinkingConfig {
-    #[serde(rename = "thinkingBudget")]
-    thinking_budget: usize,
+struct QianfanMessage<'a> {
+    role: &'a str,
+    content: Vec<QianfanContent<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum QianfanContent<'a> {
+    #[serde(rename = "text")]
+    Text { text: &'a str },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: QianfanImageUrl },
+}
+
+#[derive(Debug, Serialize)]
+struct QianfanImageUrl {
+    url: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct GeminiGenerateResponse {
-    candidates: Vec<GeminiCandidate>,
+struct QianfanChatResponse {
+    choices: Vec<QianfanChoice>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GeminiCandidate {
-    content: Option<GeminiResponseContent>,
-    #[serde(rename = "finishReason")]
+struct QianfanChoice {
+    message: Option<QianfanResponseMessage>,
+    #[serde(rename = "finish_reason")]
     finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GeminiResponseContent {
-    parts: Vec<GeminiResponsePart>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeminiResponsePart {
-    text: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct OllamaGenerateRequest<'a> {
-    model: &'a str,
-    prompt: &'a str,
-    images: Vec<String>,
-    stream: bool,
-    keep_alive: &'a str,
-    options: OllamaGenerateOptions,
-}
-
-#[derive(Debug, Serialize)]
-struct OllamaGenerateOptions {
-    num_thread: usize,
-    temperature: f32,
-}
-
-#[derive(Debug, Deserialize)]
-struct OllamaGenerateResponse {
-    response: String,
+struct QianfanResponseMessage {
+    content: Option<String>,
 }
 
 async fn ocr_document_image_to_markdown(
     path: &Path,
     config: &Config,
     client: &Client,
-    gemini_disabled_for_job: &mut bool,
-    last_gemini_attempt: &mut Option<tokio::time::Instant>,
 ) -> Result<String> {
-    if !*gemini_disabled_for_job && gemini_is_configured(config) {
-        wait_for_gemini_rate_limit(config, last_gemini_attempt).await;
-        match ocr_document_image_with_gemini(path, config, client).await {
-            Ok(markdown) => return Ok(strip_response_markdown_fence(&markdown)),
-            Err(error) => {
-                *gemini_disabled_for_job = true;
-                warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "Gemini OCR failed; falling back to local GLM/Ollama OCR for the rest of this job"
-                );
-            }
-        }
-    }
-
-    ocr_document_image_with_local_glm(path, config, client)
+    generate_with_qianfan_images(&[path], OCR_USER_PROMPT, config, client)
         .await
         .map(|markdown| strip_response_markdown_fence(&markdown))
-}
-
-fn gemini_is_configured(config: &Config) -> bool {
-    config.gemini_ocr_enabled
-        && config
-            .gemini_api_key
-            .as_deref()
-            .is_some_and(|key| !key.trim().is_empty())
-        && !config.gemini_api_endpoint.trim().is_empty()
-}
-
-async fn wait_for_gemini_rate_limit(
-    config: &Config,
-    last_gemini_attempt: &mut Option<tokio::time::Instant>,
-) {
-    let interval = Duration::from_secs(config.gemini_min_interval_seconds as u64);
-    if !interval.is_zero() {
-        if let Some(last_attempt) = *last_gemini_attempt {
-            let elapsed = last_attempt.elapsed();
-            if elapsed < interval {
-                tokio::time::sleep(interval - elapsed).await;
-            }
-        }
-    }
-    *last_gemini_attempt = Some(tokio::time::Instant::now());
-}
-
-async fn ocr_document_image_with_gemini(
-    path: &Path,
-    config: &Config,
-    client: &Client,
-) -> Result<String> {
-    let api_key = config
-        .gemini_api_key
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .context("GEMINI_API_KEY is not configured")?;
-    let image_bytes = fs::read(path)
-        .await
-        .with_context(|| format!("failed to read image {}", path.display()))?;
-    let image_base64 = BASE64.encode(image_bytes);
-    let mime_type = image_mime_type(path);
-    let thinking_config = config
-        .gemini_thinking_budget
-        .map(|thinking_budget| GeminiThinkingConfig { thinking_budget });
-    let request = GeminiGenerateRequest {
-        system_instruction: GeminiSystemInstruction {
-            parts: vec![GeminiTextPart {
-                text: OCR_SYSTEM_PROMPT,
-            }],
-        },
-        contents: vec![GeminiContent {
-            role: "user",
-            parts: vec![
-                GeminiRequestPart {
-                    text: Some(OCR_USER_PROMPT),
-                    inline_data: None,
-                },
-                GeminiRequestPart {
-                    text: None,
-                    inline_data: Some(GeminiInlineData {
-                        mime_type: &mime_type,
-                        data: &image_base64,
-                    }),
-                },
-            ],
-        }],
-        generation_config: GeminiGenerationConfig {
-            temperature: 0.0,
-            top_p: 0.1,
-            top_k: 1,
-            thinking_config,
-        },
-    };
-
-    let header_name = HeaderName::from_bytes(config.gemini_api_key_header.as_bytes())
-        .with_context(|| {
-            format!(
-                "invalid GEMINI_API_KEY_HEADER {}",
-                config.gemini_api_key_header
-            )
-        })?;
-    let header_value = HeaderValue::from_str(api_key)
-        .context("GEMINI_API_KEY contains an invalid header value")?;
-    let response = client
-        .post(gemini_generate_content_url(config))
-        .header(header_name, header_value)
-        .timeout(std::time::Duration::from_secs(
-            config.gemini_timeout_seconds as u64,
-        ))
-        .json(&request)
-        .send()
-        .await
-        .context("failed to call Gemini generateContent API")?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read Gemini response body")?;
-    if !status.is_success() {
-        bail!(
-            "Gemini returned HTTP {status}: {}",
-            response_body_snippet(&body)
-        );
-    }
-    let parsed: GeminiGenerateResponse = serde_json::from_str(&body).with_context(|| {
-        format!(
-            "failed to parse Gemini JSON response: {}",
-            response_body_snippet(&body)
-        )
-    })?;
-    extract_gemini_text(parsed)
 }
 
 fn image_mime_type(path: &Path) -> String {
@@ -1168,47 +966,11 @@ fn image_mime_type(path: &Path) -> String {
         .unwrap_or_else(|| "image/jpeg".to_string())
 }
 
-fn gemini_generate_content_url(config: &Config) -> String {
-    let endpoint = config.gemini_api_endpoint.trim();
-    if endpoint.contains("{deployment-id}") {
-        endpoint.replace("{deployment-id}", &config.gemini_deployment_id)
-    } else if endpoint.contains("{deployment_id}") {
-        endpoint.replace("{deployment_id}", &config.gemini_deployment_id)
-    } else {
-        endpoint.to_string()
-    }
-}
-
-fn extract_gemini_text(response: GeminiGenerateResponse) -> Result<String> {
-    let mut finish_reasons = Vec::new();
-    for candidate in response.candidates {
-        if let Some(reason) = candidate.finish_reason {
-            finish_reasons.push(reason);
-        }
-        let Some(content) = candidate.content else {
-            continue;
-        };
-        let text = content
-            .parts
-            .into_iter()
-            .filter_map(|part| part.text)
-            .map(|part| part.trim().to_string())
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if !text.trim().is_empty() {
-            return Ok(text);
-        }
-    }
-
-    if finish_reasons.is_empty() {
-        bail!("Gemini response did not contain Markdown text")
-    } else {
-        bail!(
-            "Gemini response did not contain Markdown text; finish reasons: {}",
-            finish_reasons.join(", ")
-        )
-    }
+fn qianfan_chat_completions_url(config: &Config) -> String {
+    format!(
+        "{}/chat/completions",
+        config.qianfan_ocr_base_url.trim_end_matches('/')
+    )
 }
 
 fn response_body_snippet(body: &str) -> String {
@@ -1220,60 +982,96 @@ fn response_body_snippet(body: &str) -> String {
     snippet
 }
 
-async fn ocr_document_image_with_local_glm(
-    path: &Path,
-    config: &Config,
-    client: &Client,
-) -> Result<String> {
-    generate_with_ollama_images(&[path], OCR_USER_PROMPT, config, client).await
-}
-
-async fn generate_with_ollama_images(
+async fn generate_with_qianfan_images(
     paths: &[&Path],
     prompt: &str,
     config: &Config,
     client: &Client,
 ) -> Result<String> {
-    let mut images = Vec::with_capacity(paths.len());
+    let full_prompt = format!("{OCR_SYSTEM_PROMPT}\n\n{prompt}");
+    let mut content = Vec::with_capacity(paths.len() + 1);
+    content.push(QianfanContent::Text { text: &full_prompt });
     for path in paths {
         let bytes = fs::read(path)
             .await
             .with_context(|| format!("failed to read image {}", path.display()))?;
-        images.push(BASE64.encode(bytes));
+        content.push(QianfanContent::ImageUrl {
+            image_url: QianfanImageUrl {
+                url: format!(
+                    "data:{};base64,{}",
+                    image_mime_type(path),
+                    BASE64.encode(bytes)
+                ),
+            },
+        });
     }
-    let request = OllamaGenerateRequest {
-        model: &config.ollama_model,
-        prompt,
-        images,
+
+    let request = QianfanChatRequest {
+        model: &config.qianfan_ocr_model,
+        messages: vec![QianfanMessage {
+            role: "user",
+            content,
+        }],
+        temperature: 0.0,
+        max_tokens: config.qianfan_ocr_max_tokens,
         stream: false,
-        keep_alive: &config.ollama_keep_alive,
-        options: OllamaGenerateOptions {
-            num_thread: config.ollama_num_thread,
-            temperature: 0.0,
-        },
     };
-    let url = format!(
-        "{}/api/generate",
-        config.ollama_base_url.trim_end_matches('/')
-    );
+
     let response = client
-        .post(url)
-        .timeout(Duration::from_secs(config.ollama_timeout_seconds as u64))
+        .post(qianfan_chat_completions_url(config))
+        .timeout(Duration::from_secs(
+            config.qianfan_ocr_timeout_seconds as u64,
+        ))
         .json(&request)
         .send()
         .await
-        .context("failed to call Ollama generate API")?;
+        .context("failed to call Qianfan OCR service")?;
     let status = response.status();
     let body = response
         .text()
         .await
-        .context("failed to read Ollama response body")?;
+        .context("failed to read Qianfan OCR response body")?;
     if !status.is_success() {
-        bail!("Ollama returned HTTP {status}: {body}");
+        bail!(
+            "Qianfan OCR returned HTTP {status}: {}",
+            response_body_snippet(&body)
+        );
     }
-    let parsed: OllamaGenerateResponse = serde_json::from_str(&body)
-        .with_context(|| format!("failed to parse Ollama JSON response: {body}"))?;
-    Ok(parsed.response)
+    let parsed: QianfanChatResponse = serde_json::from_str(&body).with_context(|| {
+        format!(
+            "failed to parse Qianfan OCR JSON response: {}",
+            response_body_snippet(&body)
+        )
+    })?;
+    extract_qianfan_text(parsed)
+}
+
+fn extract_qianfan_text(response: QianfanChatResponse) -> Result<String> {
+    let mut finish_reasons = Vec::new();
+    for choice in response.choices {
+        if let Some(reason) = choice.finish_reason {
+            finish_reasons.push(reason);
+        }
+        let Some(message) = choice.message else {
+            continue;
+        };
+        let Some(content) = message.content else {
+            continue;
+        };
+        let text = content.trim();
+        if !text.is_empty() {
+            return Ok(text.to_string());
+        }
+    }
+
+    if finish_reasons.is_empty() {
+        bail!("Qianfan OCR response did not contain Markdown text")
+    } else {
+        bail!(
+            "Qianfan OCR response did not contain Markdown text; finish reasons: {}",
+            finish_reasons.join(", ")
+        )
+    }
 }
 
 async fn audio_to_markdown(path: &Path, config: &Config) -> Result<String> {
@@ -1647,10 +1445,10 @@ async fn analyze_video_frame(
     };
     match previous {
         Some(previous) => {
-            generate_with_ollama_images(&[&previous.path, &frame.path], &prompt, config, client)
+            generate_with_qianfan_images(&[&previous.path, &frame.path], &prompt, config, client)
                 .await
         }
-        None => generate_with_ollama_images(&[&frame.path], &prompt, config, client).await,
+        None => generate_with_qianfan_images(&[&frame.path], &prompt, config, client).await,
     }
 }
 
@@ -1833,8 +1631,8 @@ mod tests {
 
     use super::{
         ConversionRoute, collapse_consecutive_repeated_transcript_lines, csv_bytes_to_markdown,
-        detect_route, extract_urls, fallback_frame_timestamps, gemini_generate_content_url,
-        normalize_markdown, orientation_ocr_text_score, should_autodetect_urls,
+        detect_route, extract_urls, fallback_frame_timestamps, normalize_markdown,
+        orientation_ocr_text_score, qianfan_chat_completions_url, should_autodetect_urls,
         strip_response_markdown_fence,
     };
     use std::{net::SocketAddr, path::Path, path::PathBuf, time::Duration};
@@ -1846,20 +1644,10 @@ mod tests {
             archive_dir: PathBuf::from("/tmp/archive"),
             failed_dir: PathBuf::from("/tmp/failed"),
             bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
-            ollama_base_url: "http://localhost:11434".to_string(),
-            ollama_model: "glm-ocr".to_string(),
-            ollama_keep_alive: "30m".to_string(),
-            ollama_num_thread: 8,
-            ollama_timeout_seconds: 600,
-            gemini_ocr_enabled: true,
-            gemini_api_key: None,
-            gemini_api_key_header: "api-key".to_string(),
-            gemini_api_endpoint:
-                "https://api.hku.hk/gemini/student/{deployment-id}:generateContent".to_string(),
-            gemini_deployment_id: "gemini-3-flash-preview".to_string(),
-            gemini_thinking_budget: None,
-            gemini_timeout_seconds: 180,
-            gemini_min_interval_seconds: 21,
+            qianfan_ocr_base_url: "http://localhost:9361/v1".to_string(),
+            qianfan_ocr_model: "baidu/Qianfan-OCR".to_string(),
+            qianfan_ocr_timeout_seconds: 600,
+            qianfan_ocr_max_tokens: 4096,
             whisper_model_path: PathBuf::from("/models/whisper/ggml-large-v3.bin"),
             whisper_cli: "whisper-cli".to_string(),
             whisper_threads: 8,
@@ -1992,11 +1780,11 @@ mod tests {
     }
 
     #[test]
-    fn gemini_endpoint_template_uses_configured_deployment() {
+    fn qianfan_chat_url_uses_configured_base_url() {
         let config = test_config();
         assert_eq!(
-            gemini_generate_content_url(&config),
-            "https://api.hku.hk/gemini/student/gemini-3-flash-preview:generateContent"
+            qianfan_chat_completions_url(&config),
+            "http://localhost:9361/v1/chat/completions"
         );
     }
 
